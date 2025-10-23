@@ -20,7 +20,7 @@
   - [x] Support for multiple regions
 - [ ] Instance filtering and search
   - [x] Filter by state (running, stopped, etc.)
-  - [ ] Filter by tag
+  - [x] Filter by tag
   - [ ] Search by name/ID
 - [ ] Instance details view
   - [ ] Show full instance metadata

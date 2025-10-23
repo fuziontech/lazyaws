@@ -17,6 +17,13 @@ type Instance struct {
 	AZ           string
 	PublicIP     string
 	PrivateIP    string
+	Tags         []Tag
+}
+
+// Tag represents a key-value pair for an AWS tag
+type Tag struct {
+	Key   string
+	Value string
 }
 
 // ListInstances retrieves all EC2 instances
@@ -41,6 +48,11 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 
 			// Extract Name tag
 			instance.Name = getNameTag(inst.Tags)
+
+			// Extract all tags
+			for _, tag := range inst.Tags {
+				instance.Tags = append(instance.Tags, Tag{Key: getString(tag.Key), Value: getString(tag.Value)})
+			}
 
 			instances = append(instances, instance)
 		}
