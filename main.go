@@ -87,6 +87,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentScreen = s3Screen
 		case "3":
 			m.currentScreen = eksScreen
+		case "c":
+			// Find the index of the current region
+			currentIndex := -1
+			for i, r := range m.config.Regions {
+				if r == m.config.Region {
+					currentIndex = i
+					break
+				}
+			}
+			// Cycle to the next region
+			if currentIndex != -1 {
+				nextIndex := (currentIndex + 1) % len(m.config.Regions)
+				m.config.Region = m.config.Regions[nextIndex]
+				m.loading = true
+				return m, m.initAWSClient
+			}
+
 		case "tab":
 			m.currentScreen = (m.currentScreen + 1) % 3
 		case "r":
@@ -164,7 +181,7 @@ func (m model) View() string {
 
 	// Footer
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	s += "\n" + helpStyle.Render("Tab: Next | 1/2/3: Switch | r: Refresh | q: Quit")
+	s += "\n" + helpStyle.Render("Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit")
 
 	return s
 }

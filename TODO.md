@@ -17,7 +17,7 @@
 - [x] List EC2 instances
   - [x] Display instance ID, name, state, type, AZ
   - [x] Color coding for instance states (running=green, stopped=yellow, terminated=red)
-  - [ ] Support for multiple regions
+  - [x] Support for multiple regions
 - [ ] Instance filtering and search
   - [ ] Filter by state (running, stopped, etc.)
   - [ ] Filter by tag
