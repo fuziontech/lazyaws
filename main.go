@@ -42,7 +42,7 @@ type instancesLoadedMsg struct {
 
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
-	ti.Placeholder = "running"
+	ti.Placeholder = "tag:key=value"
 	ti.Focus()
 	ti.CharLimit = 20
 	ti.Width = 20
@@ -245,9 +245,23 @@ func (m model) renderEC2() string {
 	if m.filter == "" {
 		filteredInstances = m.ec2Instances
 	} else {
-		for _, inst := range m.ec2Instances {
-			if strings.Contains(strings.ToLower(inst.State), strings.ToLower(m.filter)) {
-				filteredInstances = append(filteredInstances, inst)
+		if strings.Contains(m.filter, "=") {
+			parts := strings.SplitN(m.filter, "=", 2)
+			tagKey := parts[0]
+			tagValue := parts[1]
+			for _, inst := range m.ec2Instances {
+				for _, tag := range inst.Tags {
+					if tag.Key == tagKey && strings.Contains(strings.ToLower(tag.Value), strings.ToLower(tagValue)) {
+						filteredInstances = append(filteredInstances, inst)
+						break
+					}
+				}
+			}
+		} else {
+			for _, inst := range m.ec2Instances {
+				if strings.Contains(strings.ToLower(inst.State), strings.ToLower(m.filter)) {
+					filteredInstances = append(filteredInstances, inst)
+				}
 			}
 		}
 	}
