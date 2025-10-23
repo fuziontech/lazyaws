@@ -18,10 +18,10 @@
   - [x] Display instance ID, name, state, type, AZ
   - [x] Color coding for instance states (running=green, stopped=yellow, terminated=red)
   - [x] Support for multiple regions
-- [ ] Instance filtering and search
+- [x] Instance filtering and search
   - [x] Filter by state (running, stopped, etc.)
   - [x] Filter by tag
-  - [ ] Search by name/ID
+  - [x] Search by name/ID
 - [ ] Instance details view
   - [ ] Show full instance metadata
   - [ ] Display security groups
