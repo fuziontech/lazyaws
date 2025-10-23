@@ -42,7 +42,7 @@ type instancesLoadedMsg struct {
 
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
-	ti.Placeholder = "running"
+	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
 	ti.Focus()
 	ti.CharLimit = 20
 	ti.Width = 20
@@ -244,14 +244,13 @@ func (m model) renderEC2() string {
 	var filteredInstances []aws.Instance
 	if m.filter == "" {
 		filteredInstances = m.ec2Instances
-	} else {
-		for _, inst := range m.ec2Instances {
-			if strings.Contains(strings.ToLower(inst.State), strings.ToLower(m.filter)) {
-				filteredInstances = append(filteredInstances, inst)
+			} else {
+				for _, inst := range m.ec2Instances {
+					if strings.Contains(strings.ToLower(inst.State), strings.ToLower(m.filter)) || strings.Contains(strings.ToLower(inst.Name), strings.ToLower(m.filter)) || strings.Contains(strings.ToLower(inst.ID), strings.ToLower(m.filter)) {
+						filteredInstances = append(filteredInstances, inst)
+					}
+				}
 			}
-		}
-	}
-
 	if len(filteredInstances) == 0 {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No instances found")
 	}
