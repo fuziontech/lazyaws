@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fuziontech/lazyaws/internal/aws"
+	"github.com/fuziontech/lazyaws/internal/config"
 )
 
 type screen int
@@ -27,6 +28,7 @@ type model struct {
 	ec2Instances  []aws.Instance
 	loading       bool
 	err           error
+	config        *config.Config
 }
 
 type instancesLoadedMsg struct {
@@ -34,37 +36,30 @@ type instancesLoadedMsg struct {
 	err       error
 }
 
-func initialModel() model {
+func initialModel(cfg *config.Config) model {
 	return model{
 		currentScreen: ec2Screen,
 		loading:       true,
+		config:        cfg,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		initAWSClient,
-		loadEC2Instances,
-	)
+	return m.initAWSClient
 }
 
-func initAWSClient() tea.Msg {
+func (m model) initAWSClient() tea.Msg {
 	ctx := context.Background()
-	client, err := aws.NewClient(ctx)
+	client, err := aws.NewClient(ctx, m.config)
 	if err != nil {
 		return instancesLoadedMsg{err: err}
 	}
 	return client
 }
 
-func loadEC2Instances() tea.Msg {
+func (m model) loadEC2Instances() tea.Msg {
 	ctx := context.Background()
-	client, err := aws.NewClient(ctx)
-	if err != nil {
-		return instancesLoadedMsg{err: err}
-	}
-
-	instances, err := client.ListInstances(ctx)
+	instances, err := m.awsClient.ListInstances(ctx)
 	return instancesLoadedMsg{instances: instances, err: err}
 }
 
@@ -72,7 +67,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case *aws.Client:
 		m.awsClient = msg
-		return m, nil
+		return m, m.loadEC2Instances
 
 	case instancesLoadedMsg:
 		m.loading = false
@@ -96,14 +91,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentScreen = (m.currentScreen + 1) % 3
 		case "r":
 			// Refresh current view
-			if m.currentScreen == ec2Screen {
-				m.loading = true
-				return m, loadEC2Instances
-			}
-		}
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
+							if m.currentScreen == ec2Screen {
+								m.loading = true
+								return m, m.loadEC2Instances
+							}
+						}
+			
+				case tea.WindowSizeMsg:		m.width = msg.Width
 		m.height = msg.Height
 	}
 
@@ -271,7 +265,13 @@ func truncate(s string, max int) string {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Printf("Error loading config: %v", err)
+		os.Exit(1)
+	}
+
+	p := tea.NewProgram(initialModel(cfg), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v", err)
 		os.Exit(1)

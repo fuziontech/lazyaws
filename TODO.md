@@ -9,7 +9,7 @@
 - [x] Handle AWS credentials and profile selection
 - [x] Create main navigation structure
 - [x] Implement basic error handling and logging
-- [ ] Set up configuration file support
+- [x] Set up configuration file support
 
 ## Phase 1: EC2 Management
 

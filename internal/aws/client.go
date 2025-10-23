@@ -3,10 +3,11 @@ package aws
 import (
 	"context"
 
-	"github.com/aws/aws-sdk-go-v2/config"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/fuziontech/lazyaws/internal/config"
 )
 
 // Client wraps AWS service clients
@@ -18,8 +19,8 @@ type Client struct {
 }
 
 // NewClient creates a new AWS client with the default configuration
-func NewClient(ctx context.Context) (*Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+func NewClient(ctx context.Context, appConfig *config.Config) (*Client, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(appConfig.Region))
 	if err != nil {
 		return nil, err
 	}
@@ -34,8 +35,8 @@ func NewClient(ctx context.Context) (*Client, error) {
 
 // NewClientWithProfile creates a new AWS client with a specific profile
 func NewClientWithProfile(ctx context.Context, profile string) (*Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithSharedConfigProfile(profile),
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithSharedConfigProfile(profile),
 	)
 	if err != nil {
 		return nil, err
