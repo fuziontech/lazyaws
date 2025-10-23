@@ -19,7 +19,7 @@
   - [x] Color coding for instance states (running=green, stopped=yellow, terminated=red)
   - [x] Support for multiple regions
 - [ ] Instance filtering and search
-  - [ ] Filter by state (running, stopped, etc.)
+  - [x] Filter by state (running, stopped, etc.)
   - [ ] Filter by tag
   - [ ] Search by name/ID
 - [ ] Instance details view

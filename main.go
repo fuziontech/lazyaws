@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fuziontech/lazyaws/internal/aws"
@@ -29,6 +30,9 @@ type model struct {
 	loading       bool
 	err           error
 	config        *config.Config
+	filterInput   textinput.Model
+	filtering     bool
+	filter        string
 }
 
 type instancesLoadedMsg struct {
@@ -37,10 +41,18 @@ type instancesLoadedMsg struct {
 }
 
 func initialModel(cfg *config.Config) model {
+	ti := textinput.New()
+	ti.Placeholder = "running"
+	ti.Focus()
+	ti.CharLimit = 20
+	ti.Width = 20
+
 	return model{
 		currentScreen: ec2Screen,
 		loading:       true,
 		config:        cfg,
+		filterInput:   ti,
+		filtering:     false,
 	}
 }
 
@@ -64,6 +76,24 @@ func (m model) loadEC2Instances() tea.Msg {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.filtering {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "enter":
+				m.filter = m.filterInput.Value()
+				m.filtering = false
+				return m, nil
+			case "esc":
+				m.filtering = false
+				return m, nil
+			}
+		}
+		var cmd tea.Cmd
+		m.filterInput, cmd = m.filterInput.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case *aws.Client:
 		m.awsClient = msg
@@ -108,13 +138,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentScreen = (m.currentScreen + 1) % 3
 		case "r":
 			// Refresh current view
-							if m.currentScreen == ec2Screen {
-								m.loading = true
-								return m, m.loadEC2Instances
-							}
-						}
-			
-				case tea.WindowSizeMsg:		m.width = msg.Width
+			if m.currentScreen == ec2Screen {
+				m.loading = true
+				return m, m.loadEC2Instances
+			}
+		case "f":
+			m.filtering = true
+			m.filterInput.Focus()
+			return m, nil
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
 	}
 
@@ -177,17 +212,24 @@ func (m model) View() string {
 		content = m.renderEKS()
 	}
 
+	if m.filtering {
+		s += "\n" + m.filterInput.View()
+	}
+
 	s += contentStyle.Render(content) + "\n"
 
 	// Footer
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	s += "\n" + helpStyle.Render("Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit")
+	s += "\n" + helpStyle.Render("Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | f: Filter | q: Quit")
 
 	return s
 }
 
 func (m model) renderEC2() string {
 	title := lipgloss.NewStyle().Bold(true).Render("EC2 Instances")
+	if m.filter != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf(" (filtered by: %s)", m.filter))
+	}
 
 	if m.loading {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading instances...")
@@ -198,7 +240,19 @@ func (m model) renderEC2() string {
 		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
-	if len(m.ec2Instances) == 0 {
+	// Filter instances
+	var filteredInstances []aws.Instance
+	if m.filter == "" {
+		filteredInstances = m.ec2Instances
+	} else {
+		for _, inst := range m.ec2Instances {
+			if strings.Contains(strings.ToLower(inst.State), strings.ToLower(m.filter)) {
+				filteredInstances = append(filteredInstances, inst)
+			}
+		}
+	}
+
+	if len(filteredInstances) == 0 {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No instances found")
 	}
 
@@ -212,7 +266,7 @@ func (m model) renderEC2() string {
 	content.WriteString(strings.Repeat("─", 100) + "\n")
 
 	// Build table rows
-	for _, inst := range m.ec2Instances {
+	for _, inst := range filteredInstances {
 		stateStyle := getStateStyle(inst.State)
 		name := inst.Name
 		if name == "" {
@@ -236,7 +290,7 @@ func (m model) renderEC2() string {
 		))
 	}
 
-	content.WriteString(fmt.Sprintf("\nTotal: %d instances", len(m.ec2Instances)))
+	content.WriteString(fmt.Sprintf("\nTotal: %d instances", len(filteredInstances)))
 
 	return content.String()
 }
