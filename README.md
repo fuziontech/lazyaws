@@ -109,6 +109,7 @@ lazyaws provides an interactive terminal interface for common AWS operations, ma
 The AWS CLI is powerful but can be verbose and difficult to remember. lazyaws provides:
 - **Interactive interface** - Navigate resources visually instead of crafting complex CLI commands
 - **Keyboard-driven** - Fast navigation without leaving the terminal
+- **VIM-style keybindings** - Efficient navigation with j/k, search with `/`, commands with `:`, inspired by k9s
 - **Context-aware** - See relevant information and actions for each resource type
 - **Safe operations** - Confirmation prompts for destructive actions
 
@@ -159,16 +160,40 @@ lazyaws
 
 ### Keyboard Shortcuts
 
-#### General Navigation
+lazyaws features comprehensive **VIM-style keybindings** for efficient navigation and control, inspired by tools like k9s. See [VIM_KEYBINDINGS.md](VIM_KEYBINDINGS.md) for complete documentation.
+
+#### General Navigation (VIM-style)
 ```
-↑/↓ or j/k    Navigate lists
-←/→ or h/l    Switch between panels
-Tab           Cycle through sections
+j/k or ↑/↓    Navigate up/down in lists
+g             Jump to top of list
+G             Jump to bottom of list
+Ctrl+D        Page down (half page)
+Ctrl+U        Page up (half page)
+Ctrl+F        Page down (full page)
+Ctrl+B        Page up (full page)
+h             Go to parent directory (S3)
+Tab           Cycle through services
+1/2/3         Jump to EC2/S3/EKS
 Enter         Select/Execute action
 q or Esc      Go back/Exit
-?             Show help (context-sensitive)
-r             Refresh current view
-/             Search/Filter
+```
+
+#### VIM Search Mode
+```
+/             Enter search mode
+n             Jump to next search result
+N             Jump to previous search result
+Esc           Exit search mode
+```
+
+#### VIM Command Mode
+```
+:q            Quit current view/application
+:r            Refresh current view
+:sa           Select all items (EC2)
+:da           Deselect all items (EC2)
+:cf           Clear search filter
+:help         Show available commands
 ```
 
 #### EC2 Instance Management
