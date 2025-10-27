@@ -40,8 +40,8 @@
   - [x] Display CloudWatch metrics (CPU, network, etc.)
 - [x] SSM integration
   - [x] Check SSM connectivity status
-  - [ ] Launch SSM session in new terminal
-  - [ ] Support for SSM port forwarding
+  - [x] Launch SSM session in new terminal
+  - [x] Support for SSM port forwarding (via StartPortForward function)
 
 ### EC2 Enhancement
 - [ ] Bulk operations (multi-select)

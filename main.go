@@ -398,6 +398,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmInstanceID = instanceID
 				return m, nil
 			}
+		case "C":
+			// Launch SSM session (only in details view with SSM connected)
+			if m.currentScreen == ec2DetailsScreen && m.ec2InstanceDetails != nil && m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
+				err := m.awsClient.LaunchSSMSession(m.ec2InstanceDetails.ID, m.awsClient.GetRegion())
+				if err != nil {
+					m.statusMessage = fmt.Sprintf("Failed to launch SSM session: %v", err)
+				} else {
+					m.statusMessage = "Launching SSM session in new terminal..."
+				}
+				return m, nil
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -501,7 +512,12 @@ func (m model) View() string {
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	var helpText string
 	if m.currentScreen == ec2DetailsScreen {
-		helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q: Back | 1/2/3: Switch Service"
+		// Show SSM connect option if SSM is connected
+		if m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
+			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | C:SSM Connect | ESC/q: Back"
+		} else {
+			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q: Back | 1/2/3: Switch Service"
+		}
 	} else if m.currentScreen == ec2Screen {
 		helpText = "↑↓/jk: Navigate | Enter: Details | s:Start | S:Stop | R:Reboot | t:Terminate | f: Filter | q: Quit"
 	} else {
@@ -788,6 +804,10 @@ func (m model) renderEC2Details() string {
 				content.WriteString(labelStyle.Render("  Last Ping:       ") +
 					valueStyle.Render(m.ec2SSMStatus.LastPingTime) + "\n")
 			}
+			// Add hint about connecting
+			hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Italic(true)
+			content.WriteString(labelStyle.Render("  ") +
+				hintStyle.Render("Press 'C' to open SSM session in new terminal") + "\n")
 		} else {
 			disconnectStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 			content.WriteString(labelStyle.Render("  Status:          ") +
