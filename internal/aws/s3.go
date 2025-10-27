@@ -106,13 +106,8 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 			b.CreationDate = bucket.CreationDate.Format("2006-01-02 15:04:05")
 		}
 
-		// Get bucket region
-		region, err := c.GetBucketRegion(ctx, b.Name)
-		if err == nil {
-			b.Region = region
-		} else {
-			b.Region = "unknown"
-		}
+		// Set region to "loading..." initially - will be fetched async if needed
+		b.Region = "-"
 
 		buckets = append(buckets, b)
 	}
