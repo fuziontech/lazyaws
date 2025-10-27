@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -796,7 +797,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("Error generating URL: %v", msg.err)
 		} else {
 			m.s3PresignedURL = msg.url
-			m.statusMessage = "Presigned URL generated (displayed below)"
+			// Copy to clipboard on macOS
+			if runtime.GOOS == "darwin" {
+				cmd := exec.Command("pbcopy")
+				cmd.Stdin = strings.NewReader(msg.url)
+				if err := cmd.Run(); err == nil {
+					m.statusMessage = "Presigned URL copied to clipboard"
+				} else {
+					m.statusMessage = "Presigned URL generated (displayed below)"
+				}
+			} else {
+				m.statusMessage = "Presigned URL generated (displayed below)"
+			}
 		}
 		return m, nil
 
