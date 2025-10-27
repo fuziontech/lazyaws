@@ -12,9 +12,9 @@ import (
 
 // SSMConnectionStatus represents the SSM connectivity status of an instance
 type SSMConnectionStatus struct {
-	InstanceID  string
-	Connected   bool
-	PingStatus  string
+	InstanceID   string
+	Connected    bool
+	PingStatus   string
 	AgentVersion string
 	PlatformType string
 	PlatformName string
@@ -75,6 +75,9 @@ func (c *Client) LaunchSSMSession(instanceID string, region string) error {
 	// Build terminal command based on detected terminal
 	var cmd *exec.Cmd
 	switch terminal {
+	case "ghostty":
+		// Ghostty uses a similar syntax to alacritty/kitty
+		cmd = exec.Command("ghostty", "-e", "bash", "-c", ssmCommand+"; exec bash")
 	case "gnome-terminal":
 		cmd = exec.Command("gnome-terminal", "--", "bash", "-c", ssmCommand+"; exec bash")
 	case "xterm":
@@ -104,8 +107,14 @@ func (c *Client) LaunchSSMSession(instanceID string, region string) error {
 
 // detectTerminal detects the user's terminal emulator
 func detectTerminal() string {
+	// Check for Ghostty first using TERM_PROGRAM environment variable
+	if os.Getenv("TERM_PROGRAM") == "ghostty" {
+		return "ghostty"
+	}
+
 	// Check common terminal emulators
 	terminals := []string{
+		"ghostty",
 		"gnome-terminal",
 		"konsole",
 		"xfce4-terminal",
@@ -152,6 +161,8 @@ func (c *Client) StartPortForward(instanceID string, region string, localPort in
 	// Build terminal command based on detected terminal
 	var cmd *exec.Cmd
 	switch terminal {
+	case "ghostty":
+		cmd = exec.Command("ghostty", "-e", "bash", "-c", ssmCommand+"; echo 'Press Enter to close'; read")
 	case "gnome-terminal":
 		cmd = exec.Command("gnome-terminal", "--", "bash", "-c", ssmCommand+"; echo 'Press Enter to close'; read")
 	case "xterm":
@@ -178,4 +189,3 @@ func (c *Client) StartPortForward(instanceID string, region string, localPort in
 
 	return nil
 }
-
