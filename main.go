@@ -1439,9 +1439,10 @@ func (m *model) ensureVisible(selectedIndex, listLength int) {
 		return
 	}
 
-	// Calculate available height for the list
-	// Account for: header (3 lines), table header (2 lines), footer (3 lines), status (1 line), padding (4 lines)
-	availableHeight := m.height - 13
+	// Calculate available height for the list data rows only
+	// Account for: k9s header (9 lines), content border/padding (4 lines),
+	//              table title+header (2 lines), footer info (2 lines), breadcrumb (1 line)
+	availableHeight := m.height - 18
 	if availableHeight < 5 {
 		availableHeight = 5 // Minimum viewport size
 	}
@@ -1474,7 +1475,8 @@ func (m *model) getVisibleRange(listLength int) (int, int) {
 		return 0, 0
 	}
 
-	availableHeight := m.height - 13
+	// Match the calculation in ensureVisible
+	availableHeight := m.height - 18
 	if availableHeight < 5 {
 		availableHeight = 5
 	}
@@ -1981,11 +1983,9 @@ func (m model) renderEC2() string {
 
 		if i == m.ec2SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
-			selectedStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color("51")).
-				Foreground(lipgloss.Color("0")).
-				Bold(true)
-			row = selectedStyle.Render(row)
+			// Use ANSI codes directly to avoid lipgloss adding extra width
+			// \x1b[48;5;51m = cyan background, \x1b[38;5;0m = black foreground, \x1b[1m = bold, \x1b[0m = reset
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
@@ -2328,11 +2328,8 @@ func (m model) renderS3() string {
 
 		if i == m.s3SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
-			selectedStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color("51")).
-				Foreground(lipgloss.Color("0")).
-				Bold(true)
-			row = selectedStyle.Render(row)
+			// Use ANSI codes directly to avoid lipgloss adding extra width
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
@@ -2468,11 +2465,8 @@ func (m model) renderS3Browse() string {
 
 		if i == m.s3ObjectSelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
-			selectedStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color("51")).
-				Foreground(lipgloss.Color("0")).
-				Bold(true)
-			row = selectedStyle.Render(row)
+			// Use ANSI codes directly to avoid lipgloss adding extra width
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
