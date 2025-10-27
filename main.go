@@ -1441,8 +1441,8 @@ func (m *model) ensureVisible(selectedIndex, listLength int) {
 
 	// Calculate available height for the list data rows only
 	// Account for: k9s header (9 lines), content border/padding (4 lines),
-	//              table title+header (2 lines), footer info (2 lines), breadcrumb (1 line),
-	//              extra spacing (1 line), vim command line (2 lines), status message (1 line)
+	//              table title+header (2 lines), footer info (2 lines), breadcrumb (3 lines),
+	//              vim command line (2 lines)
 	availableHeight := m.height - 22
 	if availableHeight < 5 {
 		availableHeight = 5 // Minimum viewport size
@@ -1476,8 +1476,8 @@ func (m *model) getVisibleRange(listLength int) (int, int) {
 		return 0, 0
 	}
 
-	// Match the calculation in ensureVisible
-	availableHeight := m.height - 19
+	// Match the calculation in ensureVisible - MUST BE THE SAME
+	availableHeight := m.height - 22
 	if availableHeight < 5 {
 		availableHeight = 5
 	}
@@ -1539,9 +1539,8 @@ func (m model) View() string {
 
 	// Content area
 	// Set max height to prevent overflow and top clipping
-	// Account for: k9s header (9 lines), breadcrumb (1 line), vim command (2 lines),
-	//              status message (1 line), spacing (2 lines)
-	maxContentHeight := m.height - 15
+	// Leave room for header and footer elements
+	maxContentHeight := m.height - 6
 	if maxContentHeight < 10 {
 		maxContentHeight = 10
 	}
@@ -1550,7 +1549,8 @@ func (m model) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
 		Padding(1, 2).
-		MaxHeight(maxContentHeight)
+		MaxHeight(maxContentHeight).
+		Width(m.width - 2) // Full width minus small margin
 
 	var content string
 	switch m.currentScreen {
