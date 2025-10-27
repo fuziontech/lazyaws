@@ -120,6 +120,7 @@
 - [ ] Theme support (light/dark, custom colors)
 - [ ] Command history
 - [x] Vim keybinding modes (complete with search, navigation, commands)
+- [x] VIM service navigation via commands (`:ec2`, `:s3`, `:eks` with tab completion)
 - [ ] Mouse support (optional)
 
 ### Additional AWS Services (Future)

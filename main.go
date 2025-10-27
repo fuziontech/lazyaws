@@ -74,8 +74,9 @@ type model struct {
 	autoRefreshInterval     int // in seconds
 	copyToClipboard         string
 	vimState                *vim.State
-	pageSize                int // For VIM page navigation
-	viewportOffset          int // Scroll offset for current view
+	pageSize                int      // For VIM page navigation
+	viewportOffset          int      // Scroll offset for current view
+	commandSuggestions      []string // Command suggestions for tab completion
 }
 
 type instancesLoadedMsg struct {
@@ -437,7 +438,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.vimState.Mode == vim.SearchMode || m.vimState.Mode == vim.CommandMode {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
+			// Handle tab completion in command mode
+			if m.vimState.Mode == vim.CommandMode && msg.String() == "tab" {
+				completed, isComplete := vim.CompleteCommand(m.vimState.CommandBuffer)
+				m.vimState.CommandBuffer = completed
+				if !isComplete {
+					// Show suggestions
+					m.commandSuggestions = vim.GetCommandSuggestions(completed)
+				} else {
+					m.commandSuggestions = nil
+				}
+				return m, nil
+			}
+
 			if m.vimState.HandleKey(msg) {
+				// Update suggestions as user types in command mode
+				if m.vimState.Mode == vim.CommandMode {
+					m.commandSuggestions = vim.GetCommandSuggestions(m.vimState.CommandBuffer)
+				}
+
 				// If search mode was just completed, apply the search
 				if m.vimState.Mode == vim.NormalMode && m.vimState.LastSearch != "" {
 					m.applyVimSearch()
@@ -446,6 +465,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.vimState.Mode == vim.NormalMode && m.vimState.CommandBuffer != "" {
 					cmd := m.executeVimCommand(m.vimState.CommandBuffer)
 					m.vimState.CommandBuffer = ""
+					m.commandSuggestions = nil
 					return m, cmd
 				}
 				return m, nil
@@ -702,23 +722,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.s3ObjectDetails = nil
 				return m, nil
 			}
-		case "1":
-			m.currentScreen = ec2Screen
-			m.viewportOffset = 0
-			if len(m.ec2Instances) == 0 {
-				m.loading = true
-				return m, m.loadEC2Instances
-			}
-		case "2":
-			m.currentScreen = s3Screen
-			m.viewportOffset = 0
-			if len(m.s3Buckets) == 0 {
-				m.loading = true
-				return m, m.loadS3Buckets
-			}
-		case "3":
-			m.currentScreen = eksScreen
-			m.viewportOffset = 0
 		case "k", "up", "j", "down", "g", "G", "ctrl+g", "ctrl+u", "ctrl+d", "ctrl+b", "ctrl+f", "pgup", "pgdown":
 			// VIM-style navigation
 			action := vim.ParseNavigation(msg)
@@ -1394,7 +1397,33 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 
 	case vim.CmdHelp, "h", "?":
 		// Show help message
-		m.statusMessage = "VIM commands: :q (quit), :r (refresh), :sa (select all), :da (deselect all), :cf (clear filter)"
+		m.statusMessage = "VIM commands: :q (quit), :r (refresh), :sa (select all), :da (deselect all), :cf (clear filter), :ec2/:s3/:eks (switch service)"
+
+	case vim.CmdEC2:
+		// Switch to EC2 service
+		m.currentScreen = ec2Screen
+		m.viewportOffset = 0
+		if len(m.ec2Instances) == 0 {
+			m.loading = true
+			return m.loadEC2Instances
+		}
+		m.statusMessage = "Switched to EC2"
+
+	case vim.CmdS3:
+		// Switch to S3 service
+		m.currentScreen = s3Screen
+		m.viewportOffset = 0
+		if len(m.s3Buckets) == 0 {
+			m.loading = true
+			return m.loadS3Buckets
+		}
+		m.statusMessage = "Switched to S3"
+
+	case vim.CmdEKS:
+		// Switch to EKS service
+		m.currentScreen = eksScreen
+		m.viewportOffset = 0
+		m.statusMessage = "Switched to EKS"
 
 	default:
 		m.statusMessage = fmt.Sprintf("Unknown command: %s", cmd.Name)
@@ -1502,42 +1531,30 @@ func (m *model) renderWithViewport(content string) string {
 func (m model) View() string {
 	var s string
 
-	// Header with tabs and region info
-	activeTabStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("2")).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("2")).
-		Padding(0, 1)
-
-	inactiveTabStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("8")).
-		Padding(0, 1)
-
-	ec2Tab := inactiveTabStyle.Render("1. EC2")
-	s3Tab := inactiveTabStyle.Render("2. S3")
-	eksTab := inactiveTabStyle.Render("3. EKS")
-
+	// Header with service name and region info
+	var serviceName string
 	switch m.currentScreen {
 	case ec2Screen, ec2DetailsScreen:
-		ec2Tab = activeTabStyle.Render("1. EC2")
-	case s3Screen:
-		s3Tab = activeTabStyle.Render("2. S3")
+		serviceName = "EC2"
+	case s3Screen, s3BrowseScreen, s3ObjectDetailsScreen:
+		serviceName = "S3"
 	case eksScreen:
-		eksTab = activeTabStyle.Render("3. EKS")
+		serviceName = "EKS"
 	}
 
-	tabs := lipgloss.JoinHorizontal(lipgloss.Top, ec2Tab, "  ", s3Tab, "  ", eksTab)
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("2"))
 
-	// Add region info
-	regionInfo := ""
+	regionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("8"))
+
+	header := headerStyle.Render("lazyaws") + " > " + headerStyle.Render(serviceName)
 	if m.awsClient != nil {
-		regionInfo = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")).
-			Render(fmt.Sprintf("  [Region: %s]", m.awsClient.GetRegion()))
+		header += regionStyle.Render(fmt.Sprintf("  [%s]", m.awsClient.GetRegion()))
 	}
 
-	s += tabs + regionInfo + "\n\n"
+	s += header + "\n\n"
 
 	// Content area
 	contentStyle := lipgloss.NewStyle().
@@ -1580,6 +1597,13 @@ func (m model) View() string {
 			Foreground(lipgloss.Color("6")).
 			Background(lipgloss.Color("0"))
 		s += "\n" + commandStyle.Render(":"+m.vimState.CommandBuffer)
+
+		// Show command suggestions
+		if len(m.commandSuggestions) > 0 {
+			suggestionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+			suggestions := strings.Join(m.commandSuggestions, ", ")
+			s += "\n" + suggestionStyle.Render("  suggestions: "+suggestions)
+		}
 	}
 
 	// Show confirmation dialog
@@ -1646,7 +1670,7 @@ func (m model) View() string {
 		if m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
 			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | C:SSM Connect | ESC/q/:q: Back"
 		} else {
-			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q/:q: Back | 1/2/3: Switch Service"
+			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q/:q: Back"
 		}
 	} else if m.currentScreen == ec2Screen {
 		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | n/N:Next/Prev | Enter: Details | Space: Select | :Commands | q: Quit"
@@ -1661,14 +1685,14 @@ func (m model) View() string {
 	} else if m.currentScreen == s3ObjectDetailsScreen {
 		helpText = "d: Download | p: Presigned URL | ESC/q/:q: Back"
 	} else {
-		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r/:r: Refresh | q/:q: Quit"
+		helpText = "c: Change Region | r/:r: Refresh | q/:q: Quit"
 	}
 	s += "\n" + helpStyle.Render(helpText)
 
 	// Add VIM commands help on second line
 	if m.currentScreen == ec2Screen || m.currentScreen == s3Screen || m.currentScreen == s3BrowseScreen {
 		vimHelpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-		vimHelp := "Commands: :q (quit) :r (refresh) :sa (select all) :da (deselect) :cf (clear filter) :help (show all)"
+		vimHelp := "Commands: :ec2 :s3 :eks (switch) | :q (quit) :r (refresh) :sa (select all) :da (deselect) :cf (clear filter) :help (show all)"
 		s += "\n" + vimHelpStyle.Render(vimHelp)
 	}
 

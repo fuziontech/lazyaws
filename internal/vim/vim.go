@@ -295,4 +295,61 @@ const (
 	CmdSelectAll     = "sa"
 	CmdDeselectAll   = "da"
 	CmdToggleDetails = "d"
+	CmdEC2           = "ec2"
+	CmdS3            = "s3"
+	CmdEKS           = "eks"
 )
+
+// AllCommands returns a list of all available commands for completion
+func AllCommands() []string {
+	return []string{
+		"q", "quit", "qa",
+		"r", "refresh",
+		"help", "h",
+		"cf", "clearfilter",
+		"sa", "selectall",
+		"da", "deselectall",
+		"ec2", "s3", "eks",
+	}
+}
+
+// GetCommandSuggestions returns commands that match the given prefix
+func GetCommandSuggestions(prefix string) []string {
+	if prefix == "" {
+		return AllCommands()
+	}
+
+	var suggestions []string
+	for _, cmd := range AllCommands() {
+		if strings.HasPrefix(cmd, prefix) {
+			suggestions = append(suggestions, cmd)
+		}
+	}
+	return suggestions
+}
+
+// CompleteCommand returns the completed command if there's only one match
+func CompleteCommand(prefix string) (string, bool) {
+	suggestions := GetCommandSuggestions(prefix)
+	if len(suggestions) == 1 {
+		return suggestions[0], true
+	}
+
+	// Find common prefix among all suggestions
+	if len(suggestions) > 1 {
+		common := suggestions[0]
+		for _, s := range suggestions[1:] {
+			// Find common prefix between common and s
+			i := 0
+			for i < len(common) && i < len(s) && common[i] == s[i] {
+				i++
+			}
+			common = common[:i]
+		}
+		if len(common) > len(prefix) {
+			return common, false
+		}
+	}
+
+	return prefix, false
+}
