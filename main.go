@@ -61,6 +61,10 @@ type model struct {
 	s3ConfirmDelete         bool
 	s3DeleteTarget          string // "object" or "bucket"
 	s3DeleteKey             string
+	eksClusters             []aws.EKSCluster
+	eksFilteredClusters     []aws.EKSCluster // VIM-filtered view
+	eksSelectedIndex        int
+	eksClusterDetails       *aws.EKSClusterDetails
 	loading                 bool
 	err                     error
 	config                  *config.Config
@@ -165,6 +169,16 @@ type launchSSMSessionMsg struct {
 	region     string
 }
 
+type eksClustersLoadedMsg struct {
+	clusters []aws.EKSCluster
+	err      error
+}
+
+type eksClusterDetailsLoadedMsg struct {
+	details *aws.EKSClusterDetails
+	err     error
+}
+
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
@@ -209,6 +223,12 @@ func (m model) loadS3Buckets() tea.Msg {
 	ctx := context.Background()
 	buckets, err := m.awsClient.ListBuckets(ctx)
 	return bucketsLoadedMsg{buckets: buckets, err: err}
+}
+
+func (m model) loadEKSClusters() tea.Msg {
+	ctx := context.Background()
+	clusters, err := m.awsClient.ListEKSClusters(ctx)
+	return eksClustersLoadedMsg{clusters: clusters, err: err}
 }
 
 func (m model) loadS3Objects(bucket, prefix string, continuationToken *string) tea.Cmd {
@@ -608,6 +628,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case eksClustersLoadedMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.eksClusters = msg.clusters
+			m.eksSelectedIndex = 0
+		}
+		return m, nil
+
 	case objectsLoadedMsg:
 		m.loading = false
 		m.err = msg.err
@@ -857,6 +886,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = s3Screen
 			} else if m.currentScreen == s3Screen {
 				m.currentScreen = eksScreen
+				// Load EKS clusters when switching to EKS screen
+				if len(m.eksClusters) == 0 {
+					m.loading = true
+					return m, m.loadEKSClusters
+				}
 			} else if m.currentScreen == eksScreen {
 				m.currentScreen = ec2Screen
 			}
@@ -871,6 +905,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.currentScreen == s3BrowseScreen {
 				m.loading = true
 				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+			} else if m.currentScreen == eksScreen {
+				m.loading = true
+				return m, m.loadEKSClusters
 			}
 		case "backspace", "h":
 			// Go up one level in S3 browser
@@ -1303,6 +1340,10 @@ func (m *model) setSelectedIndex(index int) {
 		if index >= 0 && index < len(m.s3Objects) {
 			m.s3ObjectSelectedIndex = index
 		}
+	case eksScreen:
+		if index >= 0 && index < len(m.eksClusters) {
+			m.eksSelectedIndex = index
+		}
 	}
 }
 
@@ -1323,6 +1364,10 @@ func (m *model) applyVimSearch() {
 	case s3BrowseScreen:
 		for _, obj := range m.s3Objects {
 			searchItems = append(searchItems, strings.ToLower(obj.Key))
+		}
+	case eksScreen:
+		for _, cluster := range m.eksClusters {
+			searchItems = append(searchItems, strings.ToLower(cluster.Name+" "+cluster.Version+" "+cluster.Status+" "+cluster.Region))
 		}
 	default:
 		return
@@ -1349,6 +1394,11 @@ func (m *model) applyVimSearch() {
 			for _, idx := range m.vimState.SearchResults {
 				m.s3FilteredObjects = append(m.s3FilteredObjects, m.s3Objects[idx])
 			}
+		case eksScreen:
+			m.eksFilteredClusters = make([]aws.EKSCluster, 0, len(m.vimState.SearchResults))
+			for _, idx := range m.vimState.SearchResults {
+				m.eksFilteredClusters = append(m.eksFilteredClusters, m.eksClusters[idx])
+			}
 		}
 
 		// Reset selection to first filtered result
@@ -1364,6 +1414,8 @@ func (m *model) applyVimSearch() {
 			m.s3FilteredBuckets = []aws.Bucket{}
 		case s3BrowseScreen:
 			m.s3FilteredObjects = []aws.S3Object{}
+		case eksScreen:
+			m.eksFilteredClusters = []aws.EKSCluster{}
 		}
 	}
 }
@@ -1455,6 +1507,10 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 		// Switch to EKS service
 		m.currentScreen = eksScreen
 		m.viewportOffset = 0
+		if len(m.eksClusters) == 0 {
+			m.loading = true
+			return m.loadEKSClusters
+		}
 		m.statusMessage = "Switched to EKS"
 
 	default:
@@ -2649,12 +2705,99 @@ func (m model) renderS3ObjectDetails() string {
 }
 
 func (m model) renderEKS() string {
-	return lipgloss.NewStyle().Bold(true).Render("EKS Clusters") + "\n\n" +
-		"Coming soon:\n" +
-		"  • List clusters\n" +
-		"  • Configure kubectl\n" +
-		"  • Node group info\n" +
-		"  • Cluster details"
+	title := lipgloss.NewStyle().Bold(true).Render("EKS Clusters")
+	if m.vimState.LastSearch != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(fmt.Sprintf(" [search: %s]", m.vimState.LastSearch))
+	}
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading clusters...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	// Use filtered clusters if VIM search is active, otherwise use all clusters
+	clusters := m.eksClusters
+	if len(m.eksFilteredClusters) > 0 {
+		clusters = m.eksFilteredClusters
+	} else if m.vimState.LastSearch != "" {
+		// Search is active but no results
+		clusters = []aws.EKSCluster{}
+	}
+
+	if len(clusters) == 0 {
+		if m.vimState.LastSearch != "" {
+			return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No clusters match your search")
+		}
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No EKS clusters found")
+	}
+
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.eksSelectedIndex, len(clusters))
+	start, end := m.getVisibleRange(len(clusters))
+
+	// Build table header (k9s style)
+	var content strings.Builder
+
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	searchInfo := ""
+	if m.vimState.LastSearch != "" {
+		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
+	}
+	tableTitle := fmt.Sprintf("EKS-Clusters%s[%d]", searchInfo, len(clusters))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	titleWidth := len(tableTitle)
+	totalWidth := 100
+	dashesWidth := (totalWidth - titleWidth - 2) / 2
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
+
+	// Table header - k9s uses uppercase and symbols
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-30s %-15s %-15s %-10s %-30s",
+		"CLUSTER NAME", "VERSION", "STATUS", "NODES", "REGION")) + "\n")
+
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		cluster := clusters[i]
+
+		// Build row with proper spacing
+		row := fmt.Sprintf("%-30s %-15s %-15s %-10d %-30s",
+			truncate(cluster.Name, 30),
+			cluster.Version,
+			cluster.Status,
+			cluster.NodeCount,
+			cluster.Region,
+		)
+
+		if i == m.eksSelectedIndex {
+			// Highlight the selected row - k9s style with cyan background
+			for len(row) < 98 {
+				row += " "
+			}
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
+		}
+
+		content.WriteString(row + "\n")
+	}
+
+	// Footer info
+	content.WriteString("\n")
+	footerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	content.WriteString(footerStyle.Render(fmt.Sprintf("Showing %d-%d of %d clusters", start+1, end, len(clusters))))
+
+	return content.String()
 }
 
 func getStateStyle(state string) lipgloss.Style {
