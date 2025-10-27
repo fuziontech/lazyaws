@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -46,6 +49,43 @@ type S3ObjectDetails struct {
 	ETag         string
 	Metadata     map[string]string
 	Tags         map[string]string
+}
+
+// ProgressCallback is a function that receives progress updates
+type ProgressCallback func(bytesTransferred int64, totalBytes int64)
+
+// progressWriter wraps an io.Writer to track progress
+type progressWriter struct {
+	writer   io.Writer
+	total    int64
+	written  int64
+	callback ProgressCallback
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.writer.Write(p)
+	pw.written += int64(n)
+	if pw.callback != nil {
+		pw.callback(pw.written, pw.total)
+	}
+	return n, err
+}
+
+// progressReader wraps an io.Reader to track progress
+type progressReader struct {
+	reader   io.Reader
+	total    int64
+	read     int64
+	callback ProgressCallback
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.reader.Read(p)
+	pr.read += int64(n)
+	if pr.callback != nil {
+		pr.callback(pr.read, pr.total)
+	}
+	return n, err
 }
 
 // ListBuckets retrieves all S3 buckets
@@ -192,6 +232,23 @@ func getInt32(i int32) *int32 {
 
 // DownloadObject downloads an S3 object to a local file
 func (c *Client) DownloadObject(ctx context.Context, bucketName, key, localPath string) error {
+	return c.DownloadObjectWithProgress(ctx, bucketName, key, localPath, nil)
+}
+
+// DownloadObjectWithProgress downloads an S3 object with progress tracking
+func (c *Client) DownloadObjectWithProgress(ctx context.Context, bucketName, key, localPath string, progressCallback ProgressCallback) error {
+	// Get object size first for progress tracking
+	headInput := &s3.HeadObjectInput{
+		Bucket: &bucketName,
+		Key:    &key,
+	}
+	headResult, err := c.S3.HeadObject(ctx, headInput)
+	if err != nil {
+		return fmt.Errorf("failed to get object metadata: %w", err)
+	}
+
+	objectSize := getInt64(headResult.ContentLength)
+
 	// Create the file
 	file, err := os.Create(localPath)
 	if err != nil {
@@ -200,28 +257,54 @@ func (c *Client) DownloadObject(ctx context.Context, bucketName, key, localPath 
 	defer file.Close()
 
 	// Download the object
-	input := &s3.GetObjectInput{
+	downloader := manager.NewDownloader(c.S3)
+
+	// Wrap the file writer with progress tracking
+	var writer io.WriterAt = file
+	if progressCallback != nil {
+		writer = &progressWriterAt{
+			writer:   file,
+			total:    objectSize,
+			callback: progressCallback,
+		}
+	}
+
+	_, err = downloader.Download(ctx, writer, &s3.GetObjectInput{
 		Bucket: &bucketName,
 		Key:    &key,
-	}
-
-	result, err := c.S3.GetObject(ctx, input)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to download object: %w", err)
-	}
-	defer result.Body.Close()
-
-	// Copy the content to the file
-	_, err = io.Copy(file, result.Body)
-	if err != nil {
-		return fmt.Errorf("failed to write to local file: %w", err)
 	}
 
 	return nil
 }
 
+// progressWriterAt wraps an io.WriterAt to track progress
+type progressWriterAt struct {
+	writer   io.WriterAt
+	total    int64
+	written  int64
+	callback ProgressCallback
+}
+
+func (pw *progressWriterAt) WriteAt(p []byte, off int64) (int, error) {
+	n, err := pw.writer.WriteAt(p, off)
+	pw.written += int64(n)
+	if pw.callback != nil {
+		pw.callback(pw.written, pw.total)
+	}
+	return n, err
+}
+
 // UploadObject uploads a local file to S3
 func (c *Client) UploadObject(ctx context.Context, bucketName, key, localPath string) error {
+	return c.UploadObjectWithProgress(ctx, bucketName, key, localPath, nil)
+}
+
+// UploadObjectWithProgress uploads a local file to S3 with progress tracking
+// Automatically uses multipart upload for large files (>5MB)
+func (c *Client) UploadObjectWithProgress(ctx context.Context, bucketName, key, localPath string, progressCallback ProgressCallback) error {
 	// Open the file
 	file, err := os.Open(localPath)
 	if err != nil {
@@ -229,14 +312,34 @@ func (c *Client) UploadObject(ctx context.Context, bucketName, key, localPath st
 	}
 	defer file.Close()
 
-	// Upload the object
-	input := &s3.PutObjectInput{
-		Bucket: &bucketName,
-		Key:    &key,
-		Body:   file,
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+	fileSize := fileInfo.Size()
+
+	// Create uploader with multipart support
+	uploader := manager.NewUploader(c.S3, func(u *manager.Uploader) {
+		// Use 10MB part size for multipart uploads
+		u.PartSize = 10 * 1024 * 1024
+	})
+
+	// Wrap reader with progress tracking
+	var reader io.Reader = file
+	if progressCallback != nil {
+		reader = &progressReader{
+			reader:   file,
+			total:    fileSize,
+			callback: progressCallback,
+		}
 	}
 
-	_, err = c.S3.PutObject(ctx, input)
+	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket: &bucketName,
+		Key:    &key,
+		Body:   reader,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to upload object: %w", err)
 	}
@@ -422,4 +525,338 @@ func (c *Client) GeneratePresignedURL(ctx context.Context, bucketName, key strin
 	}
 
 	return presignResult.URL, nil
+}
+
+// GetBucketSize calculates the total size and object count for a bucket
+// Note: This can be slow for large buckets as it needs to list all objects
+func (c *Client) GetBucketSize(ctx context.Context, bucketName string) (int64, int64, error) {
+	var totalSize int64
+	var objectCount int64
+	var continuationToken *string
+
+	for {
+		input := &s3.ListObjectsV2Input{
+			Bucket: &bucketName,
+		}
+
+		if continuationToken != nil {
+			input.ContinuationToken = continuationToken
+		}
+
+		result, err := c.S3.ListObjectsV2(ctx, input)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to list objects for size calculation: %w", err)
+		}
+
+		for _, obj := range result.Contents {
+			totalSize += getInt64(obj.Size)
+			objectCount++
+		}
+
+		if !getBool(result.IsTruncated) {
+			break
+		}
+
+		continuationToken = result.NextContinuationToken
+	}
+
+	return totalSize, objectCount, nil
+}
+
+// ListObjectsWithFilter retrieves objects in an S3 bucket with filtering support
+func (c *Client) ListObjectsWithFilter(ctx context.Context, bucketName, prefix, pattern string, continuationToken *string) (*S3ListResult, error) {
+	// First, get all objects with the given prefix
+	result, err := c.ListObjects(ctx, bucketName, prefix, continuationToken)
+	if err != nil {
+		return nil, err
+	}
+
+	// If no pattern specified, return all results
+	if pattern == "" {
+		return result, nil
+	}
+
+	// Filter objects by pattern (simple contains match for now)
+	var filteredObjects []S3Object
+	for _, obj := range result.Objects {
+		// Simple pattern matching - check if key contains the pattern
+		// Could be enhanced with regex or glob patterns
+		if containsIgnoreCase(obj.Key, pattern) {
+			filteredObjects = append(filteredObjects, obj)
+		}
+	}
+
+	result.Objects = filteredObjects
+	return result, nil
+}
+
+// Helper function for case-insensitive string matching
+func containsIgnoreCase(s, substr string) bool {
+	s = toLower(s)
+	substr = toLower(substr)
+	return contains(s, substr)
+}
+
+func toLower(s string) string {
+	result := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c = c + ('a' - 'A')
+		}
+		result[i] = c
+	}
+	return string(result)
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || indexOfSubstring(s, substr) >= 0)
+}
+
+func indexOfSubstring(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			if s[i+j] != substr[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
+// SyncLocalToS3 syncs a local directory to an S3 bucket (like aws s3 sync)
+func (c *Client) SyncLocalToS3(ctx context.Context, localDir, bucketName, s3Prefix string, progressCallback ProgressCallback) error {
+	// Walk through local directory
+	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+
+		// Calculate relative path and S3 key
+		relPath, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
+		}
+
+		// Convert Windows paths to S3 format
+		s3Key := filepath.ToSlash(relPath)
+		if s3Prefix != "" {
+			s3Key = s3Prefix + "/" + s3Key
+		}
+
+		// Check if object exists and compare modification time
+		shouldUpload := true
+		headInput := &s3.HeadObjectInput{
+			Bucket: &bucketName,
+			Key:    &s3Key,
+		}
+
+		headResult, err := c.S3.HeadObject(ctx, headInput)
+		if err == nil {
+			// Object exists, check if local file is newer
+			if headResult.LastModified != nil && !info.ModTime().After(*headResult.LastModified) {
+				shouldUpload = false
+			}
+		}
+
+		if shouldUpload {
+			err = c.UploadObjectWithProgress(ctx, bucketName, s3Key, path, progressCallback)
+			if err != nil {
+				return fmt.Errorf("failed to upload %s: %w", path, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// SyncS3ToLocal syncs an S3 bucket prefix to a local directory
+func (c *Client) SyncS3ToLocal(ctx context.Context, bucketName, s3Prefix, localDir string, progressCallback ProgressCallback) error {
+	var continuationToken *string
+
+	for {
+		// List objects with prefix
+		result, err := c.ListObjects(ctx, bucketName, s3Prefix, continuationToken)
+		if err != nil {
+			return err
+		}
+
+		for _, obj := range result.Objects {
+			// Skip folders
+			if obj.IsFolder {
+				continue
+			}
+
+			// Calculate local path
+			relKey := strings.TrimPrefix(obj.Key, s3Prefix)
+			relKey = strings.TrimPrefix(relKey, "/")
+			localPath := filepath.Join(localDir, filepath.FromSlash(relKey))
+
+			// Create directory if needed
+			localDir := filepath.Dir(localPath)
+			if err := os.MkdirAll(localDir, 0755); err != nil {
+				return fmt.Errorf("failed to create directory: %w", err)
+			}
+
+			// Check if local file exists and compare modification time
+			shouldDownload := true
+			if fileInfo, err := os.Stat(localPath); err == nil {
+				// Parse object's last modified time
+				objTime, _ := time.Parse("2006-01-02 15:04:05", obj.LastModified)
+				if !objTime.After(fileInfo.ModTime()) {
+					shouldDownload = false
+				}
+			}
+
+			if shouldDownload {
+				err = c.DownloadObjectWithProgress(ctx, bucketName, obj.Key, localPath, progressCallback)
+				if err != nil {
+					return fmt.Errorf("failed to download %s: %w", obj.Key, err)
+				}
+			}
+		}
+
+		if !result.IsTruncated {
+			break
+		}
+
+		continuationToken = result.NextContinuationToken
+	}
+
+	return nil
+}
+
+// ListObjectVersions lists all versions of objects in a bucket
+func (c *Client) ListObjectVersions(ctx context.Context, bucketName, prefix string) ([]S3ObjectVersion, error) {
+	input := &s3.ListObjectVersionsInput{
+		Bucket: &bucketName,
+	}
+
+	if prefix != "" {
+		input.Prefix = &prefix
+	}
+
+	result, err := c.S3.ListObjectVersions(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list object versions: %w", err)
+	}
+
+	var versions []S3ObjectVersion
+	for _, version := range result.Versions {
+		v := S3ObjectVersion{
+			Key:          getString(version.Key),
+			VersionId:    getString(version.VersionId),
+			IsLatest:     getBool(version.IsLatest),
+			Size:         getInt64(version.Size),
+			StorageClass: string(version.StorageClass),
+		}
+
+		if version.LastModified != nil {
+			v.LastModified = version.LastModified.Format("2006-01-02 15:04:05")
+		}
+
+		versions = append(versions, v)
+	}
+
+	return versions, nil
+}
+
+// S3ObjectVersion represents a version of an S3 object
+type S3ObjectVersion struct {
+	Key          string
+	VersionId    string
+	IsLatest     bool
+	Size         int64
+	LastModified string
+	StorageClass string
+}
+
+// GetObjectVersion downloads a specific version of an S3 object
+func (c *Client) GetObjectVersion(ctx context.Context, bucketName, key, versionId, localPath string) error {
+	file, err := os.Create(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to create local file: %w", err)
+	}
+	defer file.Close()
+
+	input := &s3.GetObjectInput{
+		Bucket:    &bucketName,
+		Key:       &key,
+		VersionId: &versionId,
+	}
+
+	result, err := c.S3.GetObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to download object version: %w", err)
+	}
+	defer result.Body.Close()
+
+	_, err = io.Copy(file, result.Body)
+	if err != nil {
+		return fmt.Errorf("failed to write to local file: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteObjectVersion deletes a specific version of an S3 object
+func (c *Client) DeleteObjectVersion(ctx context.Context, bucketName, key, versionId string) error {
+	input := &s3.DeleteObjectInput{
+		Bucket:    &bucketName,
+		Key:       &key,
+		VersionId: &versionId,
+	}
+
+	_, err := c.S3.DeleteObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to delete object version: %w", err)
+	}
+
+	return nil
+}
+
+// EnableBucketVersioning enables versioning on a bucket
+func (c *Client) EnableBucketVersioning(ctx context.Context, bucketName string) error {
+	enabled := types.BucketVersioningStatusEnabled
+	input := &s3.PutBucketVersioningInput{
+		Bucket: &bucketName,
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: enabled,
+		},
+	}
+
+	_, err := c.S3.PutBucketVersioning(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to enable bucket versioning: %w", err)
+	}
+
+	return nil
+}
+
+// SuspendBucketVersioning suspends versioning on a bucket
+func (c *Client) SuspendBucketVersioning(ctx context.Context, bucketName string) error {
+	suspended := types.BucketVersioningStatusSuspended
+	input := &s3.PutBucketVersioningInput{
+		Bucket: &bucketName,
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: suspended,
+		},
+	}
+
+	_, err := c.S3.PutBucketVersioning(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to suspend bucket versioning: %w", err)
+	}
+
+	return nil
 }

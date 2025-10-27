@@ -54,7 +54,7 @@
 ### Core S3 Features
 - [x] List S3 buckets
   - [x] Display bucket name, region, creation date
-  - [ ] Show bucket size (if available)
+  - [x] Show bucket size (if available)
 - [x] Browse bucket contents
   - [x] Navigate folder structure
   - [x] Display object size, last modified, storage class
@@ -76,35 +76,35 @@
   - [x] View bucket policies
   - [x] View bucket versioning settings
 - [x] Generate presigned URLs
-- [ ] Search/filter objects by prefix or pattern
+- [x] Search/filter objects by prefix or pattern
 
 ### S3 Enhancement
-- [ ] Progress bars for uploads/downloads
-- [ ] Support for multipart uploads
-- [ ] Sync functionality (like aws s3 sync)
-- [ ] Object versioning support
+- [x] Progress bars for uploads/downloads
+- [x] Support for multipart uploads
+- [x] Sync functionality (like aws s3 sync)
+- [x] Object versioning support
 
 ## Phase 3: EKS Management
 
 ### Core EKS Features
-- [ ] List EKS clusters
-  - [ ] Display cluster name, version, status, region
-  - [ ] Show node count
-- [ ] Cluster details view
-  - [ ] Show endpoint and certificate
-  - [ ] Display networking configuration
-  - [ ] Show enabled log types
-- [ ] Node group management
-  - [ ] List node groups
-  - [ ] Show node group details (size, instance types)
-  - [ ] Display scaling configuration
+- [x] List EKS clusters
+  - [x] Display cluster name, version, status, region
+  - [x] Show node count
+- [x] Cluster details view
+  - [x] Show endpoint and certificate
+  - [x] Display networking configuration
+  - [x] Show enabled log types
+- [x] Node group management
+  - [x] List node groups
+  - [x] Show node group details (size, instance types)
+  - [x] Display scaling configuration
 
 ### EKS Actions
-- [ ] Configure kubectl context
-  - [ ] Update kubeconfig automatically
-  - [ ] Switch between cluster contexts
-- [ ] View cluster add-ons
-- [ ] Display cluster logs (if enabled)
+- [x] Configure kubectl context
+  - [x] Update kubeconfig automatically
+  - [x] Switch between cluster contexts
+- [x] View cluster add-ons
+- [x] Display cluster logs (if enabled)
 - [ ] Open cluster in AWS console (browser)
 
 ### EKS Enhancement

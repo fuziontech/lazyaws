@@ -148,3 +148,152 @@ func TestGetInt32(t *testing.T) {
 		t.Errorf("Expected 100, got %d", *ptr)
 	}
 }
+
+func TestS3ObjectVersion(t *testing.T) {
+	// Test S3ObjectVersion struct creation
+	version := S3ObjectVersion{
+		Key:          "file.txt",
+		VersionId:    "v1.0",
+		IsLatest:     true,
+		Size:         2048,
+		LastModified: "2024-01-01 12:00:00",
+		StorageClass: "STANDARD",
+	}
+
+	if version.Key != "file.txt" {
+		t.Errorf("Expected key 'file.txt', got '%s'", version.Key)
+	}
+
+	if version.VersionId != "v1.0" {
+		t.Errorf("Expected version ID 'v1.0', got '%s'", version.VersionId)
+	}
+
+	if !version.IsLatest {
+		t.Errorf("Expected IsLatest to be true, got false")
+	}
+
+	if version.Size != 2048 {
+		t.Errorf("Expected size 2048, got %d", version.Size)
+	}
+}
+
+func TestProgressCallback(t *testing.T) {
+	// Test progress callback
+	var lastBytes int64
+	var lastTotal int64
+
+	callback := func(transferred, total int64) {
+		lastBytes = transferred
+		lastTotal = total
+	}
+
+	// Simulate progress
+	callback(100, 1000)
+	if lastBytes != 100 {
+		t.Errorf("Expected 100 bytes transferred, got %d", lastBytes)
+	}
+	if lastTotal != 1000 {
+		t.Errorf("Expected 1000 total bytes, got %d", lastTotal)
+	}
+
+	callback(500, 1000)
+	if lastBytes != 500 {
+		t.Errorf("Expected 500 bytes transferred, got %d", lastBytes)
+	}
+
+	callback(1000, 1000)
+	if lastBytes != 1000 {
+		t.Errorf("Expected 1000 bytes transferred, got %d", lastBytes)
+	}
+}
+
+func TestContainsIgnoreCase(t *testing.T) {
+	// Test case-insensitive string matching
+	tests := []struct {
+		str      string
+		substr   string
+		expected bool
+	}{
+		{"HelloWorld", "hello", true},
+		{"HelloWorld", "WORLD", true},
+		{"HelloWorld", "test", false},
+		{"test-file.txt", "FILE", true},
+		{"", "test", false},
+		{"test", "", true},
+	}
+
+	for _, tt := range tests {
+		result := containsIgnoreCase(tt.str, tt.substr)
+		if result != tt.expected {
+			t.Errorf("containsIgnoreCase(%q, %q) = %v, expected %v",
+				tt.str, tt.substr, result, tt.expected)
+		}
+	}
+}
+
+func TestToLower(t *testing.T) {
+	// Test toLower helper function
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"HELLO", "hello"},
+		{"HeLLo", "hello"},
+		{"hello", "hello"},
+		{"TEST123", "test123"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		result := toLower(tt.input)
+		if result != tt.expected {
+			t.Errorf("toLower(%q) = %q, expected %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestContains(t *testing.T) {
+	// Test contains helper function
+	tests := []struct {
+		str      string
+		substr   string
+		expected bool
+	}{
+		{"hello world", "world", true},
+		{"hello world", "test", false},
+		{"test", "test", true},
+		{"test", "", true},
+		{"", "test", false},
+	}
+
+	for _, tt := range tests {
+		result := contains(tt.str, tt.substr)
+		if result != tt.expected {
+			t.Errorf("contains(%q, %q) = %v, expected %v",
+				tt.str, tt.substr, result, tt.expected)
+		}
+	}
+}
+
+func TestIndexOfSubstring(t *testing.T) {
+	// Test indexOfSubstring helper function
+	tests := []struct {
+		str      string
+		substr   string
+		expected int
+	}{
+		{"hello world", "world", 6},
+		{"hello world", "hello", 0},
+		{"hello world", "test", -1},
+		{"test", "test", 0},
+		{"", "test", -1},
+	}
+
+	for _, tt := range tests {
+		result := indexOfSubstring(tt.str, tt.substr)
+		if result != tt.expected {
+			t.Errorf("indexOfSubstring(%q, %q) = %d, expected %d",
+				tt.str, tt.substr, result, tt.expected)
+		}
+	}
+}
