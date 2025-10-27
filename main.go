@@ -25,6 +25,7 @@ const (
 	s3BrowseScreen
 	s3ObjectDetailsScreen
 	eksScreen
+	eksDetailsScreen
 )
 
 type model struct {
@@ -65,6 +66,8 @@ type model struct {
 	eksFilteredClusters     []aws.EKSCluster // VIM-filtered view
 	eksSelectedIndex        int
 	eksClusterDetails       *aws.EKSClusterDetails
+	eksNodeGroups           []aws.EKSNodeGroup
+	eksAddons               []aws.EKSAddon
 	loading                 bool
 	err                     error
 	config                  *config.Config
@@ -175,8 +178,15 @@ type eksClustersLoadedMsg struct {
 }
 
 type eksClusterDetailsLoadedMsg struct {
-	details *aws.EKSClusterDetails
-	err     error
+	details    *aws.EKSClusterDetails
+	nodeGroups []aws.EKSNodeGroup
+	addons     []aws.EKSAddon
+	err        error
+}
+
+type kubeconfigUpdatedMsg struct {
+	clusterName string
+	err         error
 }
 
 func initialModel(cfg *config.Config) model {
@@ -229,6 +239,82 @@ func (m model) loadEKSClusters() tea.Msg {
 	ctx := context.Background()
 	clusters, err := m.awsClient.ListEKSClusters(ctx)
 	return eksClustersLoadedMsg{clusters: clusters, err: err}
+}
+
+func (m model) loadEKSClusterDetails(clusterName string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Load cluster details, node groups, and addons in parallel
+		detailsChan := make(chan *aws.EKSClusterDetails)
+		nodeGroupsChan := make(chan []aws.EKSNodeGroup)
+		addonsChan := make(chan []aws.EKSAddon)
+		errChan := make(chan error, 3)
+
+		// Load cluster details
+		go func() {
+			details, err := m.awsClient.GetEKSClusterDetails(ctx, clusterName)
+			if err != nil {
+				errChan <- err
+				detailsChan <- nil
+				return
+			}
+			detailsChan <- details
+			errChan <- nil
+		}()
+
+		// Load node groups
+		go func() {
+			nodeGroups, err := m.awsClient.ListNodeGroups(ctx, clusterName)
+			if err != nil {
+				errChan <- err
+				nodeGroupsChan <- nil
+				return
+			}
+			nodeGroupsChan <- nodeGroups
+			errChan <- nil
+		}()
+
+		// Load addons
+		go func() {
+			addons, err := m.awsClient.ListAddons(ctx, clusterName)
+			if err != nil {
+				errChan <- err
+				addonsChan <- nil
+				return
+			}
+			addonsChan <- addons
+			errChan <- nil
+		}()
+
+		// Wait for all to complete
+		details := <-detailsChan
+		nodeGroups := <-nodeGroupsChan
+		addons := <-addonsChan
+
+		// Check for errors
+		var firstErr error
+		for i := 0; i < 3; i++ {
+			if err := <-errChan; err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+
+		return eksClusterDetailsLoadedMsg{
+			details:    details,
+			nodeGroups: nodeGroups,
+			addons:     addons,
+			err:        firstErr,
+		}
+	}
+}
+
+func (m model) updateKubeconfig(clusterName string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.UpdateKubeconfig(ctx, clusterName)
+		return kubeconfigUpdatedMsg{clusterName: clusterName, err: err}
+	}
 }
 
 func (m model) loadS3Objects(bucket, prefix string, continuationToken *string) tea.Cmd {
@@ -637,6 +723,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case eksClusterDetailsLoadedMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.eksClusterDetails = msg.details
+			m.eksNodeGroups = msg.nodeGroups
+			m.eksAddons = msg.addons
+			m.currentScreen = eksDetailsScreen
+			m.viewportOffset = 0
+		}
+		return m, nil
+
+	case kubeconfigUpdatedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error updating kubeconfig: %v", msg.err)
+		} else {
+			m.statusMessage = fmt.Sprintf("Updated kubeconfig for cluster: %s", msg.clusterName)
+		}
+		return m, nil
+
 	case objectsLoadedMsg:
 		m.loading = false
 		m.err = msg.err
@@ -782,6 +889,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = s3BrowseScreen
 				m.s3ObjectDetails = nil
 				return m, nil
+			} else if m.currentScreen == eksDetailsScreen {
+				m.currentScreen = eksScreen
+				m.eksClusterDetails = nil
+				m.eksNodeGroups = nil
+				m.eksAddons = nil
+				return m, nil
 			}
 		case "k", "up", "j", "down", "g", "G", "ctrl+g", "ctrl+u", "ctrl+d", "ctrl+b", "ctrl+f", "pgup", "pgdown":
 			// VIM-style navigation
@@ -862,6 +975,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, m.loadS3ObjectDetails(m.s3CurrentBucket, selectedObject.Key)
 					}
 				}
+			} else if m.currentScreen == eksScreen {
+				// View EKS cluster details - use filtered list if active
+				clusters := m.eksClusters
+				if len(m.eksFilteredClusters) > 0 {
+					clusters = m.eksFilteredClusters
+				}
+				if len(clusters) > 0 && m.eksSelectedIndex < len(clusters) {
+					selectedCluster := clusters[m.eksSelectedIndex]
+					m.loading = true
+					m.viewportOffset = 0
+					return m, m.loadEKSClusterDetails(selectedCluster.Name)
+				}
 			}
 		case "c":
 			// Find the index of the current region
@@ -908,6 +1033,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.currentScreen == eksScreen {
 				m.loading = true
 				return m, m.loadEKSClusters
+			}
+		case "K":
+			// Update kubeconfig for selected EKS cluster
+			if m.currentScreen == eksScreen {
+				// Use filtered list if active
+				clusters := m.eksClusters
+				if len(m.eksFilteredClusters) > 0 {
+					clusters = m.eksFilteredClusters
+				}
+				if len(clusters) > 0 && m.eksSelectedIndex < len(clusters) {
+					selectedCluster := clusters[m.eksSelectedIndex]
+					m.loading = true
+					m.statusMessage = fmt.Sprintf("Updating kubeconfig for %s...", selectedCluster.Name)
+					return m, m.updateKubeconfig(selectedCluster.Name)
+				}
+			} else if m.currentScreen == eksDetailsScreen && m.eksClusterDetails != nil {
+				// Update kubeconfig from details screen
+				m.loading = true
+				m.statusMessage = fmt.Sprintf("Updating kubeconfig for %s...", m.eksClusterDetails.Name)
+				return m, m.updateKubeconfig(m.eksClusterDetails.Name)
 			}
 		case "backspace", "h":
 			// Go up one level in S3 browser
@@ -1656,6 +1801,8 @@ func (m model) View() string {
 		content = m.renderS3ObjectDetails()
 	case eksScreen:
 		content = m.renderEKS()
+	case eksDetailsScreen:
+		content = m.renderEKSDetails()
 	}
 
 	if m.filtering {
@@ -1780,6 +1927,9 @@ func (m model) renderK9sHeader() string {
 	case eksScreen:
 		serviceName = "EKS"
 		viewName = "Clusters"
+	case eksDetailsScreen:
+		serviceName = "EKS"
+		viewName = "Cluster Details"
 	}
 
 	leftSide.WriteString(labelStyle.Render("Service: ") + valueStyle.Render(serviceName) + "\n")
@@ -1844,8 +1994,13 @@ func (m model) renderK9sHeader() string {
 	case eksScreen:
 		keyHints = []string{
 			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Details"),
-			keyHintKeyStyle.Render("<k>") + " " + keyHintActionStyle.Render("Kubeconfig"),
+			keyHintKeyStyle.Render("<K>") + " " + keyHintActionStyle.Render("Update Kubeconfig"),
 			keyHintKeyStyle.Render("<:>") + " " + keyHintActionStyle.Render("Command"),
+		}
+	case eksDetailsScreen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<K>") + " " + keyHintActionStyle.Render("Update Kubeconfig"),
+			keyHintKeyStyle.Render("<esc>") + " " + keyHintActionStyle.Render("Back"),
 		}
 	}
 
@@ -1981,6 +2136,12 @@ func (m model) renderK9sBreadcrumb() string {
 		breadcrumbs = []string{"<s3>", "<object>", "<details>"}
 	case eksScreen:
 		breadcrumbs = []string{"<eks>", "<clusters>"}
+	case eksDetailsScreen:
+		if m.eksClusterDetails != nil {
+			breadcrumbs = []string{"<eks>", "<clusters>", "<" + m.eksClusterDetails.Name + ">"}
+		} else {
+			breadcrumbs = []string{"<eks>", "<clusters>", "<details>"}
+		}
 	}
 
 	var result strings.Builder
@@ -2798,6 +2959,169 @@ func (m model) renderEKS() string {
 	content.WriteString(footerStyle.Render(fmt.Sprintf("Showing %d-%d of %d clusters", start+1, end, len(clusters))))
 
 	return content.String()
+}
+
+func (m model) renderEKSDetails() string {
+	title := lipgloss.NewStyle().Bold(true).Render("EKS Cluster Details")
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading cluster details...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	if m.eksClusterDetails == nil {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No cluster details available")
+	}
+
+	details := m.eksClusterDetails
+	var content strings.Builder
+	content.WriteString(title + "\n\n")
+
+	// Section styling
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	valueStyle := lipgloss.NewStyle()
+
+	// Basic Information
+	content.WriteString(sectionStyle.Render("Cluster Information") + "\n")
+	content.WriteString(labelStyle.Render("  Name:            ") + valueStyle.Render(details.Name) + "\n")
+	content.WriteString(labelStyle.Render("  Version:         ") + valueStyle.Render(details.Version) + "\n")
+	content.WriteString(labelStyle.Render("  Status:          ") + getEKSStatusStyle(details.Status).Render(details.Status) + "\n")
+	if details.Endpoint != "" {
+		content.WriteString(labelStyle.Render("  Endpoint:        ") + valueStyle.Render(details.Endpoint) + "\n")
+	}
+	content.WriteString(labelStyle.Render("  Region:          ") + valueStyle.Render(details.Region) + "\n")
+	if details.CreatedAt != "" {
+		content.WriteString(labelStyle.Render("  Created:         ") + valueStyle.Render(details.CreatedAt) + "\n")
+	}
+	if details.PlatformVersion != "" {
+		content.WriteString(labelStyle.Render("  Platform:        ") + valueStyle.Render(details.PlatformVersion) + "\n")
+	}
+	content.WriteString("\n")
+
+	// IAM and Security
+	content.WriteString(sectionStyle.Render("IAM & Security") + "\n")
+	if details.RoleArn != "" {
+		content.WriteString(labelStyle.Render("  Role ARN:        ") + valueStyle.Render(details.RoleArn) + "\n")
+	}
+	content.WriteString("\n")
+
+	// Network Configuration
+	content.WriteString(sectionStyle.Render("Network Configuration") + "\n")
+	if details.VpcId != "" {
+		content.WriteString(labelStyle.Render("  VPC ID:          ") + valueStyle.Render(details.VpcId) + "\n")
+	}
+	if len(details.SubnetIds) > 0 {
+		content.WriteString(labelStyle.Render("  Subnets:         ") + valueStyle.Render(fmt.Sprintf("%d configured", len(details.SubnetIds))) + "\n")
+		for i, subnet := range details.SubnetIds {
+			if i < 3 { // Show first 3
+				content.WriteString(labelStyle.Render("                   ") + valueStyle.Render(subnet) + "\n")
+			} else if i == 3 {
+				content.WriteString(labelStyle.Render("                   ") + valueStyle.Render(fmt.Sprintf("... and %d more", len(details.SubnetIds)-3)) + "\n")
+				break
+			}
+		}
+	}
+	if len(details.SecurityGroupIds) > 0 {
+		content.WriteString(labelStyle.Render("  Security Groups: ") + valueStyle.Render(fmt.Sprintf("%d configured", len(details.SecurityGroupIds))) + "\n")
+		for i, sg := range details.SecurityGroupIds {
+			if i < 3 { // Show first 3
+				content.WriteString(labelStyle.Render("                   ") + valueStyle.Render(sg) + "\n")
+			} else if i == 3 {
+				content.WriteString(labelStyle.Render("                   ") + valueStyle.Render(fmt.Sprintf("... and %d more", len(details.SecurityGroupIds)-3)) + "\n")
+				break
+			}
+		}
+	}
+	content.WriteString("\n")
+
+	// Logging
+	if len(details.EnabledLogTypes) > 0 {
+		content.WriteString(sectionStyle.Render("Logging") + "\n")
+		content.WriteString(labelStyle.Render("  Enabled Types:   ") + valueStyle.Render(strings.Join(details.EnabledLogTypes, ", ")) + "\n")
+		content.WriteString("\n")
+	}
+
+	// Node Groups
+	if len(m.eksNodeGroups) > 0 {
+		content.WriteString(sectionStyle.Render(fmt.Sprintf("Node Groups (%d)", len(m.eksNodeGroups))) + "\n")
+
+		// Table header
+		headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
+		content.WriteString("  " + headerStyle.Render(fmt.Sprintf("%-25s %-15s %-20s %-15s",
+			"NAME", "STATUS", "INSTANCE TYPES", "SIZE (D/Min/Max)")) + "\n")
+
+		for _, ng := range m.eksNodeGroups {
+			instanceTypes := strings.Join(ng.InstanceTypes, ", ")
+			if len(instanceTypes) > 20 {
+				instanceTypes = instanceTypes[:17] + "..."
+			}
+			sizeInfo := fmt.Sprintf("%d/%d/%d", ng.DesiredSize, ng.MinSize, ng.MaxSize)
+
+			content.WriteString("  " + fmt.Sprintf("%-25s %-15s %-20s %-15s",
+				truncate(ng.Name, 25),
+				ng.Status,
+				instanceTypes,
+				sizeInfo,
+			) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// Add-ons
+	if len(m.eksAddons) > 0 {
+		content.WriteString(sectionStyle.Render(fmt.Sprintf("Add-ons (%d)", len(m.eksAddons))) + "\n")
+
+		// Table header
+		headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
+		content.WriteString("  " + headerStyle.Render(fmt.Sprintf("%-25s %-15s %-15s",
+			"NAME", "VERSION", "STATUS")) + "\n")
+
+		for _, addon := range m.eksAddons {
+			content.WriteString("  " + fmt.Sprintf("%-25s %-15s %-15s",
+				truncate(addon.Name, 25),
+				truncate(addon.Version, 15),
+				addon.Status,
+			) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// Tags
+	if len(details.Tags) > 0 {
+		content.WriteString(sectionStyle.Render(fmt.Sprintf("Tags (%d)", len(details.Tags))) + "\n")
+		count := 0
+		for key, value := range details.Tags {
+			if count < 10 { // Show first 10 tags
+				content.WriteString(labelStyle.Render(fmt.Sprintf("  %-20s ", key)) + valueStyle.Render(value) + "\n")
+				count++
+			} else {
+				content.WriteString(labelStyle.Render(fmt.Sprintf("  ... and %d more tags", len(details.Tags)-10)) + "\n")
+				break
+			}
+		}
+	}
+
+	return content.String()
+}
+
+func getEKSStatusStyle(status string) lipgloss.Style {
+	switch strings.ToUpper(status) {
+	case "ACTIVE":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // Green
+	case "CREATING", "UPDATING":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // Yellow
+	case "DELETING":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // Red
+	case "FAILED":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // Red
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // Gray
+	}
 }
 
 func getStateStyle(state string) lipgloss.Style {
