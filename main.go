@@ -1162,6 +1162,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // Helper functions for VIM navigation
 func (m *model) handleVimNavigation(action vim.NavigationAction) {
+	// For detail screens, handle viewport scrolling instead of item navigation
+	if m.currentScreen == ec2DetailsScreen || m.currentScreen == s3ObjectDetailsScreen {
+		m.handleDetailViewScroll(action)
+		return
+	}
+
 	var listLength int
 	var currentIndex int
 
@@ -1198,7 +1204,7 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 		}
 		currentIndex = m.s3ObjectSelectedIndex
 	default:
-		return // No navigation for detail screens
+		return // No navigation for other screens
 	}
 
 	if listLength == 0 {
@@ -1213,6 +1219,39 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 
 	// Ensure the selected item is visible in the viewport
 	m.ensureVisible(newIndex, listLength)
+}
+
+// handleDetailViewScroll handles scrolling in detail views
+func (m *model) handleDetailViewScroll(action vim.NavigationAction) {
+	// For detail views, we scroll the viewport by lines
+	switch action {
+	case vim.MoveUp:
+		if m.viewportOffset > 0 {
+			m.viewportOffset--
+		}
+	case vim.MoveDown:
+		m.viewportOffset++
+		// Max will be clamped by renderWithViewport
+	case vim.MoveTop:
+		m.viewportOffset = 0
+	case vim.MoveBottom:
+		// Set to a large number, renderWithViewport will clamp it
+		m.viewportOffset = 10000
+	case vim.MoveHalfPageUp:
+		m.viewportOffset -= m.pageSize / 2
+		if m.viewportOffset < 0 {
+			m.viewportOffset = 0
+		}
+	case vim.MoveHalfPageDown:
+		m.viewportOffset += m.pageSize / 2
+	case vim.MovePageUp:
+		m.viewportOffset -= m.pageSize
+		if m.viewportOffset < 0 {
+			m.viewportOffset = 0
+		}
+	case vim.MovePageDown:
+		m.viewportOffset += m.pageSize
+	}
 }
 
 func (m *model) setSelectedIndex(index int) {
@@ -1418,6 +1457,46 @@ func (m *model) getVisibleRange(listLength int) (int, int) {
 	}
 
 	return start, end
+}
+
+// renderWithViewport takes a multi-line string and returns only visible lines
+func (m *model) renderWithViewport(content string) string {
+	lines := strings.Split(content, "\n")
+
+	// Calculate available height for content
+	// Account for: header (3 lines), footer (3 lines), status (1 line), padding (4 lines)
+	availableHeight := m.height - 11
+	if availableHeight < 10 {
+		availableHeight = 10 // Minimum viewport
+	}
+
+	totalLines := len(lines)
+	if totalLines <= availableHeight {
+		// Content fits, no need to scroll
+		return content
+	}
+
+	// Apply viewport
+	start := m.viewportOffset
+	end := start + availableHeight
+	if end > totalLines {
+		end = totalLines
+	}
+	if start >= totalLines {
+		start = totalLines - availableHeight
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	visibleLines := lines[start:end]
+	result := strings.Join(visibleLines, "\n")
+
+	// Add scroll indicator
+	scrollInfo := fmt.Sprintf("\n[Lines %d-%d of %d] (j/k to scroll)", start+1, end, totalLines)
+	result += lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(scrollInfo)
+
+	return result
 }
 
 func (m model) View() string {
@@ -1965,7 +2044,7 @@ func (m model) renderEC2Details() string {
 		}
 	}
 
-	return content.String()
+	return m.renderWithViewport(content.String())
 }
 
 func (m model) renderS3() string {
@@ -2252,7 +2331,7 @@ func (m model) renderS3ObjectDetails() string {
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
 	content.WriteString(hintStyle.Render("Press 'd' to download this file") + "\n")
 
-	return content.String()
+	return m.renderWithViewport(content.String())
 }
 
 func (m model) renderEKS() string {
