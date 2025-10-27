@@ -1441,8 +1441,9 @@ func (m *model) ensureVisible(selectedIndex, listLength int) {
 
 	// Calculate available height for the list data rows only
 	// Account for: k9s header (9 lines), content border/padding (4 lines),
-	//              table title+header (2 lines), footer info (2 lines), breadcrumb (1 line)
-	availableHeight := m.height - 18
+	//              table title+header (2 lines), footer info (2 lines), breadcrumb (1 line),
+	//              extra spacing (1 line)
+	availableHeight := m.height - 19
 	if availableHeight < 5 {
 		availableHeight = 5 // Minimum viewport size
 	}
@@ -1476,7 +1477,7 @@ func (m *model) getVisibleRange(listLength int) (int, int) {
 	}
 
 	// Match the calculation in ensureVisible
-	availableHeight := m.height - 18
+	availableHeight := m.height - 19
 	if availableHeight < 5 {
 		availableHeight = 5
 	}
@@ -1950,7 +1951,7 @@ func (m model) renderEC2() string {
 		inst := filteredInstances[i]
 		name := inst.Name
 		if name == "" {
-			name = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("-")
+			name = "-" // Don't use lipgloss styling - it breaks alignment
 		}
 
 		ip := inst.PublicIP
