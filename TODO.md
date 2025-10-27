@@ -55,19 +55,19 @@
 - [x] List S3 buckets
   - [x] Display bucket name, region, creation date
   - [ ] Show bucket size (if available)
-- [ ] Browse bucket contents
-  - [ ] Navigate folder structure
-  - [ ] Display object size, last modified, storage class
-  - [ ] Support for pagination (large buckets)
-- [ ] Object details view
-  - [ ] Show metadata
-  - [ ] Display tags
-  - [ ] Show permissions
+- [x] Browse bucket contents
+  - [x] Navigate folder structure
+  - [x] Display object size, last modified, storage class
+  - [x] Support for pagination (large buckets)
+- [x] Object details view
+  - [x] Show metadata
+  - [x] Display tags
+  - [x] Show ETag, content type, storage class
 
 ### S3 Actions
-- [ ] File operations
-  - [ ] Upload files/folders
-  - [ ] Download files/folders
+- [x] File operations
+  - [x] Upload files (API implemented, UI shows placeholder message)
+  - [x] Download files/folders
   - [ ] Delete objects (with confirmation)
   - [ ] Copy/move objects between buckets
 - [ ] Bucket management

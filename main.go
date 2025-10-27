@@ -19,6 +19,8 @@ const (
 	ec2Screen screen = iota
 	ec2DetailsScreen
 	s3Screen
+	s3BrowseScreen
+	s3ObjectDetailsScreen
 	eksScreen
 )
 
@@ -33,9 +35,16 @@ type model struct {
 	ec2InstanceStatus   *aws.InstanceStatus
 	ec2InstanceMetrics  *aws.InstanceMetrics
 	ec2SSMStatus        *aws.SSMConnectionStatus
-	s3Buckets           []aws.Bucket
-	s3SelectedIndex     int
-	loading             bool
+	s3Buckets                 []aws.Bucket
+	s3SelectedIndex           int
+	s3CurrentBucket           string
+	s3CurrentPrefix           string
+	s3Objects                 []aws.S3Object
+	s3ObjectSelectedIndex     int
+	s3NextContinuationToken   *string
+	s3IsTruncated             bool
+	s3ObjectDetails           *aws.S3ObjectDetails
+	loading                   bool
 	err                 error
 	config              *config.Config
 	filterInput         textinput.Model
@@ -82,6 +91,21 @@ type bucketsLoadedMsg struct {
 	err     error
 }
 
+type objectsLoadedMsg struct {
+	result *aws.S3ListResult
+	err    error
+}
+
+type objectDetailsLoadedMsg struct {
+	details *aws.S3ObjectDetails
+	err     error
+}
+
+type fileOperationCompletedMsg struct {
+	operation string
+	err       error
+}
+
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
@@ -121,6 +145,38 @@ func (m model) loadS3Buckets() tea.Msg {
 	ctx := context.Background()
 	buckets, err := m.awsClient.ListBuckets(ctx)
 	return bucketsLoadedMsg{buckets: buckets, err: err}
+}
+
+func (m model) loadS3Objects(bucket, prefix string, continuationToken *string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		result, err := m.awsClient.ListObjects(ctx, bucket, prefix, continuationToken)
+		return objectsLoadedMsg{result: result, err: err}
+	}
+}
+
+func (m model) loadS3ObjectDetails(bucket, key string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		details, err := m.awsClient.GetObjectDetails(ctx, bucket, key)
+		return objectDetailsLoadedMsg{details: details, err: err}
+	}
+}
+
+func (m model) downloadS3Object(bucket, key, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.DownloadObject(ctx, bucket, key, localPath)
+		return fileOperationCompletedMsg{operation: "download", err: err}
+	}
+}
+
+func (m model) uploadS3Object(bucket, key, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.UploadObject(ctx, bucket, key, localPath)
+		return fileOperationCompletedMsg{operation: "upload", err: err}
+	}
 }
 
 func (m model) loadEC2InstanceDetails(instanceID string) tea.Cmd {
@@ -281,6 +337,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case objectsLoadedMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.s3Objects = msg.result.Objects
+			m.s3NextContinuationToken = msg.result.NextContinuationToken
+			m.s3IsTruncated = msg.result.IsTruncated
+			m.s3ObjectSelectedIndex = 0
+			m.currentScreen = s3BrowseScreen
+		}
+		return m, nil
+
+	case objectDetailsLoadedMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.s3ObjectDetails = msg.details
+			m.currentScreen = s3ObjectDetailsScreen
+		}
+		return m, nil
+
+	case fileOperationCompletedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error %sing: %v", msg.operation, msg.err)
+		} else {
+			m.statusMessage = fmt.Sprintf("Successfully %sed file", msg.operation)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -289,6 +375,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = ec2Screen
 				m.ec2InstanceDetails = nil
 				return m, nil
+			} else if m.currentScreen == s3BrowseScreen {
+				m.currentScreen = s3Screen
+				m.s3Objects = nil
+				m.s3CurrentBucket = ""
+				m.s3CurrentPrefix = ""
+				return m, nil
+			} else if m.currentScreen == s3ObjectDetailsScreen {
+				m.currentScreen = s3BrowseScreen
+				m.s3ObjectDetails = nil
+				return m, nil
 			}
 			return m, tea.Quit
 		case "esc":
@@ -296,6 +392,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentScreen == ec2DetailsScreen {
 				m.currentScreen = ec2Screen
 				m.ec2InstanceDetails = nil
+				return m, nil
+			} else if m.currentScreen == s3BrowseScreen {
+				m.currentScreen = s3Screen
+				m.s3Objects = nil
+				m.s3CurrentBucket = ""
+				m.s3CurrentPrefix = ""
+				return m, nil
+			} else if m.currentScreen == s3ObjectDetailsScreen {
+				m.currentScreen = s3BrowseScreen
+				m.s3ObjectDetails = nil
 				return m, nil
 			}
 		case "1":
@@ -322,6 +428,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.s3SelectedIndex > 0 {
 					m.s3SelectedIndex--
 				}
+			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				if m.s3ObjectSelectedIndex > 0 {
+					m.s3ObjectSelectedIndex--
+				}
 			}
 		case "down", "j":
 			// Navigate down in lists
@@ -333,13 +443,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.s3SelectedIndex < len(m.s3Buckets)-1 {
 					m.s3SelectedIndex++
 				}
+			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				if m.s3ObjectSelectedIndex < len(m.s3Objects)-1 {
+					m.s3ObjectSelectedIndex++
+				}
 			}
-		case "enter":
-			// Enter key to view instance details
+		case "enter", "i":
+			// Enter key to view instance details or browse S3 bucket, or view object details
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				selectedInstance := m.ec2Instances[m.ec2SelectedIndex]
 				m.loading = true
 				return m, m.loadEC2InstanceDetails(selectedInstance.ID)
+			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
+				// Browse bucket contents
+				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
+				m.s3CurrentBucket = selectedBucket.Name
+				m.s3CurrentPrefix = ""
+				m.loading = true
+				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
+				if selectedObject.IsFolder {
+					// Navigate into folder
+					m.s3CurrentPrefix = selectedObject.Key
+					m.loading = true
+					return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+				} else {
+					// View file details
+					m.loading = true
+					return m, m.loadS3ObjectDetails(m.s3CurrentBucket, selectedObject.Key)
+				}
 			}
 		case "c":
 			// Find the index of the current region
@@ -375,6 +508,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.currentScreen == s3Screen {
 				m.loading = true
 				return m, m.loadS3Buckets
+			} else if m.currentScreen == s3BrowseScreen {
+				m.loading = true
+				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+			}
+		case "backspace", "h":
+			// Go up one level in S3 browser
+			if m.currentScreen == s3BrowseScreen {
+				if m.s3CurrentPrefix == "" {
+					// At root, go back to bucket list
+					m.currentScreen = s3Screen
+					m.s3Objects = nil
+					m.s3CurrentBucket = ""
+					return m, nil
+				}
+				// Remove last directory from prefix
+				parts := strings.Split(strings.TrimSuffix(m.s3CurrentPrefix, "/"), "/")
+				if len(parts) > 1 {
+					m.s3CurrentPrefix = strings.Join(parts[:len(parts)-1], "/") + "/"
+				} else {
+					m.s3CurrentPrefix = ""
+				}
+				m.loading = true
+				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+			}
+		case "n":
+			// Load next page in S3 browser
+			if m.currentScreen == s3BrowseScreen && m.s3IsTruncated && m.s3NextContinuationToken != nil {
+				m.loading = true
+				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, m.s3NextContinuationToken)
+			}
+		case "d":
+			// Download selected S3 object
+			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
+				if !selectedObject.IsFolder {
+					// Extract just the filename from the key
+					fileName := selectedObject.Key
+					if strings.Contains(fileName, "/") {
+						parts := strings.Split(fileName, "/")
+						fileName = parts[len(parts)-1]
+					}
+					m.loading = true
+					m.statusMessage = fmt.Sprintf("Downloading %s...", fileName)
+					return m, m.downloadS3Object(m.s3CurrentBucket, selectedObject.Key, fileName)
+				}
+			} else if m.currentScreen == s3ObjectDetailsScreen && m.s3ObjectDetails != nil {
+				// Download from object details view
+				fileName := m.s3ObjectDetails.Key
+				if strings.Contains(fileName, "/") {
+					parts := strings.Split(fileName, "/")
+					fileName = parts[len(parts)-1]
+				}
+				m.loading = true
+				m.statusMessage = fmt.Sprintf("Downloading %s...", fileName)
+				return m, m.downloadS3Object(m.s3CurrentBucket, m.s3ObjectDetails.Key, fileName)
+			}
+		case "u":
+			// Upload file to S3 (prompt for file path)
+			// For now, we'll just show a message that upload requires file path
+			// In a full implementation, we'd add a text input for the file path
+			if m.currentScreen == s3BrowseScreen {
+				m.statusMessage = "Upload: Feature requires interactive file picker (coming soon)"
 			}
 		case "f":
 			// Only filter on EC2 list screen
@@ -514,6 +709,10 @@ func (m model) View() string {
 		content = m.renderEC2Details()
 	case s3Screen:
 		content = m.renderS3()
+	case s3BrowseScreen:
+		content = m.renderS3Browse()
+	case s3ObjectDetailsScreen:
+		content = m.renderS3ObjectDetails()
 	case eksScreen:
 		content = m.renderEKS()
 	}
@@ -561,6 +760,16 @@ func (m model) View() string {
 		}
 	} else if m.currentScreen == ec2Screen {
 		helpText = "↑↓/jk: Navigate | Enter: Details | s:Start | S:Stop | R:Reboot | t:Terminate | f: Filter | q: Quit"
+	} else if m.currentScreen == s3Screen {
+		helpText = "↑↓/jk: Navigate | Enter: Browse Bucket | r: Refresh | Tab: Next | 1/2/3: Switch | q: Quit"
+	} else if m.currentScreen == s3BrowseScreen {
+		nextPageHint := ""
+		if m.s3IsTruncated {
+			nextPageHint = " | n: Next Page"
+		}
+		helpText = "↑↓/jk: Navigate | Enter/i: View Details | d: Download | h/Backspace: Up" + nextPageHint + " | ESC/q: Back"
+	} else if m.currentScreen == s3ObjectDetailsScreen {
+		helpText = "ESC/q: Back | d: Download"
 	} else {
 		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit"
 	}
@@ -966,8 +1175,192 @@ func (m model) renderS3() string {
 	}
 
 	content.WriteString(fmt.Sprintf("\nTotal: %d buckets", len(m.s3Buckets)))
-	content.WriteString("\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-		"Coming soon: Browse objects, Upload/Download, Bucket management"))
+
+	return content.String()
+}
+
+func (m model) renderS3Browse() string {
+	// Build breadcrumb
+	breadcrumbStyle := lipgloss.NewStyle().Bold(true)
+	bucketStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	var breadcrumbs strings.Builder
+	breadcrumbs.WriteString(bucketStyle.Render(m.s3CurrentBucket))
+
+	if m.s3CurrentPrefix != "" {
+		parts := strings.Split(strings.TrimSuffix(m.s3CurrentPrefix, "/"), "/")
+		for _, part := range parts {
+			if part != "" {
+				breadcrumbs.WriteString(separatorStyle.Render(" > "))
+				breadcrumbs.WriteString(part)
+			}
+		}
+	}
+
+	title := breadcrumbStyle.Render("S3 Browser: ") + breadcrumbs.String()
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading objects...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	if len(m.s3Objects) == 0 {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No objects found (empty folder)")
+	}
+
+	// Build table header
+	var content strings.Builder
+	content.WriteString(title + "\n\n")
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-6s %-50s %-15s %-25s %-20s\n",
+		"TYPE", "NAME", "SIZE", "LAST MODIFIED", "STORAGE CLASS")))
+	content.WriteString(strings.Repeat("─", 120) + "\n")
+
+	// Build table rows
+	for i, obj := range m.s3Objects {
+		var typeIcon, name, size, lastModified, storageClass string
+
+		if obj.IsFolder {
+			typeIcon = "DIR"
+			// Extract folder name from full key
+			folderName := strings.TrimSuffix(obj.Key, "/")
+			if m.s3CurrentPrefix != "" {
+				folderName = strings.TrimPrefix(folderName, m.s3CurrentPrefix)
+			}
+			name = folderName + "/"
+			size = "-"
+			lastModified = "-"
+			storageClass = "-"
+		} else {
+			typeIcon = "FILE"
+			// Extract file name from full key
+			fileName := obj.Key
+			if m.s3CurrentPrefix != "" {
+				fileName = strings.TrimPrefix(fileName, m.s3CurrentPrefix)
+			}
+			name = fileName
+			size = formatBytes(obj.Size)
+			lastModified = obj.LastModified
+			storageClass = obj.StorageClass
+		}
+
+		// Style for folders
+		if obj.IsFolder {
+			typeIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render(typeIcon)
+			name = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true).Render(name)
+		}
+
+		// Highlight selected row
+		row := fmt.Sprintf("%-6s %-50s %-15s %-25s %-20s",
+			typeIcon,
+			truncate(name, 50),
+			size,
+			lastModified,
+			truncate(storageClass, 20),
+		)
+
+		if i == m.s3ObjectSelectedIndex {
+			// Highlight the selected row
+			selectedStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("240")).
+				Foreground(lipgloss.Color("15"))
+			row = selectedStyle.Render(row)
+		}
+
+		content.WriteString(row + "\n")
+	}
+
+	// Pagination info
+	content.WriteString(fmt.Sprintf("\nShowing: %d objects", len(m.s3Objects)))
+	if m.s3IsTruncated {
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(" (more available - press 'n' for next page)"))
+	}
+
+	return content.String()
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func (m model) renderS3ObjectDetails() string {
+	title := lipgloss.NewStyle().Bold(true).Render("S3 Object Details")
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading object details...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	if m.s3ObjectDetails == nil {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No object details available")
+	}
+
+	details := m.s3ObjectDetails
+	var content strings.Builder
+	content.WriteString(title + "\n\n")
+
+	// Section styling
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	valueStyle := lipgloss.NewStyle()
+
+	// Basic Information
+	content.WriteString(sectionStyle.Render("Object Information") + "\n")
+	content.WriteString(labelStyle.Render("  Bucket:          ") + valueStyle.Render(m.s3CurrentBucket) + "\n")
+	content.WriteString(labelStyle.Render("  Key:             ") + valueStyle.Render(details.Key) + "\n")
+	content.WriteString(labelStyle.Render("  Size:            ") + valueStyle.Render(formatBytes(details.Size)) + "\n")
+	if details.LastModified != "" {
+		content.WriteString(labelStyle.Render("  Last Modified:   ") + valueStyle.Render(details.LastModified) + "\n")
+	}
+	content.WriteString(labelStyle.Render("  Storage Class:   ") + valueStyle.Render(details.StorageClass) + "\n")
+	if details.ContentType != "" {
+		content.WriteString(labelStyle.Render("  Content Type:    ") + valueStyle.Render(details.ContentType) + "\n")
+	}
+	if details.ETag != "" {
+		content.WriteString(labelStyle.Render("  ETag:            ") + valueStyle.Render(details.ETag) + "\n")
+	}
+	content.WriteString("\n")
+
+	// Metadata
+	if len(details.Metadata) > 0 {
+		content.WriteString(sectionStyle.Render("Metadata") + "\n")
+		for key, value := range details.Metadata {
+			content.WriteString(labelStyle.Render(fmt.Sprintf("  %s: ", key)) + valueStyle.Render(value) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// Tags
+	if len(details.Tags) > 0 {
+		content.WriteString(sectionStyle.Render("Tags") + "\n")
+		for key, value := range details.Tags {
+			content.WriteString(labelStyle.Render(fmt.Sprintf("  %s: ", key)) + valueStyle.Render(value) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// Actions hint
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	content.WriteString(hintStyle.Render("Press 'd' to download this file") + "\n")
 
 	return content.String()
 }
