@@ -20,6 +20,7 @@ const (
 	ec2DetailsScreen
 	s3Screen
 	s3BrowseScreen
+	s3ObjectDetailsScreen
 	eksScreen
 )
 
@@ -42,6 +43,7 @@ type model struct {
 	s3ObjectSelectedIndex     int
 	s3NextContinuationToken   *string
 	s3IsTruncated             bool
+	s3ObjectDetails           *aws.S3ObjectDetails
 	loading                   bool
 	err                 error
 	config              *config.Config
@@ -94,6 +96,16 @@ type objectsLoadedMsg struct {
 	err    error
 }
 
+type objectDetailsLoadedMsg struct {
+	details *aws.S3ObjectDetails
+	err     error
+}
+
+type fileOperationCompletedMsg struct {
+	operation string
+	err       error
+}
+
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
@@ -140,6 +152,30 @@ func (m model) loadS3Objects(bucket, prefix string, continuationToken *string) t
 		ctx := context.Background()
 		result, err := m.awsClient.ListObjects(ctx, bucket, prefix, continuationToken)
 		return objectsLoadedMsg{result: result, err: err}
+	}
+}
+
+func (m model) loadS3ObjectDetails(bucket, key string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		details, err := m.awsClient.GetObjectDetails(ctx, bucket, key)
+		return objectDetailsLoadedMsg{details: details, err: err}
+	}
+}
+
+func (m model) downloadS3Object(bucket, key, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.DownloadObject(ctx, bucket, key, localPath)
+		return fileOperationCompletedMsg{operation: "download", err: err}
+	}
+}
+
+func (m model) uploadS3Object(bucket, key, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.UploadObject(ctx, bucket, key, localPath)
+		return fileOperationCompletedMsg{operation: "upload", err: err}
 	}
 }
 
@@ -313,6 +349,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case objectDetailsLoadedMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.s3ObjectDetails = msg.details
+			m.currentScreen = s3ObjectDetailsScreen
+		}
+		return m, nil
+
+	case fileOperationCompletedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error %sing: %v", msg.operation, msg.err)
+		} else {
+			m.statusMessage = fmt.Sprintf("Successfully %sed file", msg.operation)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -327,6 +381,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.s3CurrentBucket = ""
 				m.s3CurrentPrefix = ""
 				return m, nil
+			} else if m.currentScreen == s3ObjectDetailsScreen {
+				m.currentScreen = s3BrowseScreen
+				m.s3ObjectDetails = nil
+				return m, nil
 			}
 			return m, tea.Quit
 		case "esc":
@@ -340,6 +398,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.s3Objects = nil
 				m.s3CurrentBucket = ""
 				m.s3CurrentPrefix = ""
+				return m, nil
+			} else if m.currentScreen == s3ObjectDetailsScreen {
+				m.currentScreen = s3BrowseScreen
+				m.s3ObjectDetails = nil
 				return m, nil
 			}
 		case "1":
@@ -386,8 +448,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.s3ObjectSelectedIndex++
 				}
 			}
-		case "enter":
-			// Enter key to view instance details or browse S3 bucket
+		case "enter", "i":
+			// Enter key to view instance details or browse S3 bucket, or view object details
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				selectedInstance := m.ec2Instances[m.ec2SelectedIndex]
 				m.loading = true
@@ -400,12 +462,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
 			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				// Navigate into folder
 				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
 				if selectedObject.IsFolder {
+					// Navigate into folder
 					m.s3CurrentPrefix = selectedObject.Key
 					m.loading = true
 					return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+				} else {
+					// View file details
+					m.loading = true
+					return m, m.loadS3ObjectDetails(m.s3CurrentBucket, selectedObject.Key)
 				}
 			}
 		case "c":
@@ -471,6 +537,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentScreen == s3BrowseScreen && m.s3IsTruncated && m.s3NextContinuationToken != nil {
 				m.loading = true
 				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, m.s3NextContinuationToken)
+			}
+		case "d":
+			// Download selected S3 object
+			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
+				if !selectedObject.IsFolder {
+					// Extract just the filename from the key
+					fileName := selectedObject.Key
+					if strings.Contains(fileName, "/") {
+						parts := strings.Split(fileName, "/")
+						fileName = parts[len(parts)-1]
+					}
+					m.loading = true
+					m.statusMessage = fmt.Sprintf("Downloading %s...", fileName)
+					return m, m.downloadS3Object(m.s3CurrentBucket, selectedObject.Key, fileName)
+				}
+			} else if m.currentScreen == s3ObjectDetailsScreen && m.s3ObjectDetails != nil {
+				// Download from object details view
+				fileName := m.s3ObjectDetails.Key
+				if strings.Contains(fileName, "/") {
+					parts := strings.Split(fileName, "/")
+					fileName = parts[len(parts)-1]
+				}
+				m.loading = true
+				m.statusMessage = fmt.Sprintf("Downloading %s...", fileName)
+				return m, m.downloadS3Object(m.s3CurrentBucket, m.s3ObjectDetails.Key, fileName)
+			}
+		case "u":
+			// Upload file to S3 (prompt for file path)
+			// For now, we'll just show a message that upload requires file path
+			// In a full implementation, we'd add a text input for the file path
+			if m.currentScreen == s3BrowseScreen {
+				m.statusMessage = "Upload: Feature requires interactive file picker (coming soon)"
 			}
 		case "f":
 			// Only filter on EC2 list screen
@@ -612,6 +711,8 @@ func (m model) View() string {
 		content = m.renderS3()
 	case s3BrowseScreen:
 		content = m.renderS3Browse()
+	case s3ObjectDetailsScreen:
+		content = m.renderS3ObjectDetails()
 	case eksScreen:
 		content = m.renderEKS()
 	}
@@ -666,7 +767,9 @@ func (m model) View() string {
 		if m.s3IsTruncated {
 			nextPageHint = " | n: Next Page"
 		}
-		helpText = "↑↓/jk: Navigate | Enter: Open Folder | h/Backspace: Up Level | r: Refresh" + nextPageHint + " | ESC/q: Back"
+		helpText = "↑↓/jk: Navigate | Enter/i: View Details | d: Download | h/Backspace: Up" + nextPageHint + " | ESC/q: Back"
+	} else if m.currentScreen == s3ObjectDetailsScreen {
+		helpText = "ESC/q: Back | d: Download"
 	} else {
 		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit"
 	}
@@ -1193,6 +1296,73 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func (m model) renderS3ObjectDetails() string {
+	title := lipgloss.NewStyle().Bold(true).Render("S3 Object Details")
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading object details...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	if m.s3ObjectDetails == nil {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No object details available")
+	}
+
+	details := m.s3ObjectDetails
+	var content strings.Builder
+	content.WriteString(title + "\n\n")
+
+	// Section styling
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	valueStyle := lipgloss.NewStyle()
+
+	// Basic Information
+	content.WriteString(sectionStyle.Render("Object Information") + "\n")
+	content.WriteString(labelStyle.Render("  Bucket:          ") + valueStyle.Render(m.s3CurrentBucket) + "\n")
+	content.WriteString(labelStyle.Render("  Key:             ") + valueStyle.Render(details.Key) + "\n")
+	content.WriteString(labelStyle.Render("  Size:            ") + valueStyle.Render(formatBytes(details.Size)) + "\n")
+	if details.LastModified != "" {
+		content.WriteString(labelStyle.Render("  Last Modified:   ") + valueStyle.Render(details.LastModified) + "\n")
+	}
+	content.WriteString(labelStyle.Render("  Storage Class:   ") + valueStyle.Render(details.StorageClass) + "\n")
+	if details.ContentType != "" {
+		content.WriteString(labelStyle.Render("  Content Type:    ") + valueStyle.Render(details.ContentType) + "\n")
+	}
+	if details.ETag != "" {
+		content.WriteString(labelStyle.Render("  ETag:            ") + valueStyle.Render(details.ETag) + "\n")
+	}
+	content.WriteString("\n")
+
+	// Metadata
+	if len(details.Metadata) > 0 {
+		content.WriteString(sectionStyle.Render("Metadata") + "\n")
+		for key, value := range details.Metadata {
+			content.WriteString(labelStyle.Render(fmt.Sprintf("  %s: ", key)) + valueStyle.Render(value) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// Tags
+	if len(details.Tags) > 0 {
+		content.WriteString(sectionStyle.Render("Tags") + "\n")
+		for key, value := range details.Tags {
+			content.WriteString(labelStyle.Render(fmt.Sprintf("  %s: ", key)) + valueStyle.Render(value) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// Actions hint
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	content.WriteString(hintStyle.Render("Press 'd' to download this file") + "\n")
+
+	return content.String()
 }
 
 func (m model) renderEKS() string {
