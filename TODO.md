@@ -55,10 +55,10 @@
 - [x] List S3 buckets
   - [x] Display bucket name, region, creation date
   - [ ] Show bucket size (if available)
-- [ ] Browse bucket contents
-  - [ ] Navigate folder structure
-  - [ ] Display object size, last modified, storage class
-  - [ ] Support for pagination (large buckets)
+- [x] Browse bucket contents
+  - [x] Navigate folder structure
+  - [x] Display object size, last modified, storage class
+  - [x] Support for pagination (large buckets)
 - [ ] Object details view
   - [ ] Show metadata
   - [ ] Display tags
