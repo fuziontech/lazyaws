@@ -22,11 +22,11 @@
   - [x] Filter by state (running, stopped, etc.)
   - [x] Filter by tag
   - [x] Search by name/ID
-- [ ] Instance details view
-  - [ ] Show full instance metadata
-  - [ ] Display security groups
-  - [ ] Show attached volumes
-  - [ ] Display network interfaces
+- [x] Instance details view
+  - [x] Show full instance metadata
+  - [x] Display security groups
+  - [x] Show attached volumes
+  - [x] Display network interfaces
 
 ### EC2 Actions
 - [ ] Instance state management
