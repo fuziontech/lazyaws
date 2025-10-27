@@ -1534,18 +1534,13 @@ func (m model) View() string {
 	// K9s-style header: left sidebar with context info, center/right with key hints
 	s += m.renderK9sHeader() + "\n"
 
-	// Content area - make it fill the terminal height
-	// Calculate height: terminal height - header (9 lines) - breadcrumb (1 line) - borders/padding (~4)
-	contentHeight := m.height - 14
-	if contentHeight < 10 {
-		contentHeight = 10
-	}
-
+	// Content area
+	// Don't set a fixed height - let content flow naturally
+	// The viewport scrolling in renderEC2/renderS3 handles visible items
 	contentStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
-		Padding(1, 2).
-		Height(contentHeight)
+		Padding(1, 2)
 
 	var content string
 	switch m.currentScreen {
