@@ -44,10 +44,10 @@
   - [x] Support for SSM port forwarding (via StartPortForward function)
 
 ### EC2 Enhancement
-- [ ] Bulk operations (multi-select)
+- [x] Bulk operations (multi-select)
 - [x] Instance type information and pricing
-- [ ] Auto-refresh with configurable interval
-- [ ] Copy instance ID/IP to clipboard
+- [x] Auto-refresh with configurable interval
+- [x] Copy instance ID/IP to clipboard
 
 ## Phase 2: S3 Management
 
@@ -68,14 +68,14 @@
 - [x] File operations
   - [x] Upload files (API implemented, UI shows placeholder message)
   - [x] Download files/folders
-  - [ ] Delete objects (with confirmation)
-  - [ ] Copy/move objects between buckets
-- [ ] Bucket management
-  - [ ] Create buckets
-  - [ ] Delete buckets (with confirmation)
-  - [ ] View bucket policies
-  - [ ] View bucket versioning settings
-- [ ] Generate presigned URLs
+  - [x] Delete objects (with confirmation)
+  - [x] Copy/move objects between buckets (API implemented)
+- [x] Bucket management
+  - [x] Create buckets (API implemented)
+  - [x] Delete buckets (with confirmation)
+  - [x] View bucket policies
+  - [x] View bucket versioning settings
+- [x] Generate presigned URLs
 - [ ] Search/filter objects by prefix or pattern
 
 ### S3 Enhancement

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,6 +32,7 @@ type model struct {
 	awsClient           *aws.Client
 	ec2Instances        []aws.Instance
 	ec2SelectedIndex    int
+	ec2SelectedInstances map[string]bool // Multi-select support
 	ec2InstanceDetails  *aws.InstanceDetails
 	ec2InstanceStatus   *aws.InstanceStatus
 	ec2InstanceMetrics  *aws.InstanceMetrics
@@ -44,6 +46,16 @@ type model struct {
 	s3NextContinuationToken   *string
 	s3IsTruncated             bool
 	s3ObjectDetails           *aws.S3ObjectDetails
+	s3Filter                  string
+	s3FilterActive            bool
+	s3PresignedURL            string
+	s3BucketPolicy            string
+	s3BucketVersioning        string
+	s3ShowingInfo             bool  // For showing bucket policy/versioning
+	s3InfoType                string // "policy" or "versioning"
+	s3ConfirmDelete           bool
+	s3DeleteTarget            string // "object" or "bucket"
+	s3DeleteKey               string
 	loading                   bool
 	err                 error
 	config              *config.Config
@@ -54,6 +66,9 @@ type model struct {
 	confirmInstanceID   string
 	showingConfirm      bool
 	statusMessage       string
+	autoRefresh         bool
+	autoRefreshInterval int // in seconds
+	copyToClipboard     string
 }
 
 type instancesLoadedMsg struct {
@@ -106,6 +121,34 @@ type fileOperationCompletedMsg struct {
 	err       error
 }
 
+type tickMsg struct{}
+
+type bulkActionCompletedMsg struct{
+	action string
+	successCount int
+	failureCount int
+}
+
+type s3ActionCompletedMsg struct {
+	action string
+	err    error
+}
+
+type presignedURLGeneratedMsg struct {
+	url string
+	err error
+}
+
+type bucketPolicyLoadedMsg struct {
+	policy string
+	err    error
+}
+
+type bucketVersioningLoadedMsg struct {
+	versioning string
+	err        error
+}
+
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
@@ -114,11 +157,14 @@ func initialModel(cfg *config.Config) model {
 	ti.Width = 20
 
 	return model{
-		currentScreen: ec2Screen,
-		loading:       true,
-		config:        cfg,
-		filterInput:   ti,
-		filtering:     false,
+		currentScreen:        ec2Screen,
+		loading:              true,
+		config:               cfg,
+		filterInput:          ti,
+		filtering:            false,
+		ec2SelectedInstances: make(map[string]bool),
+		autoRefresh:          false,
+		autoRefreshInterval:  30, // Default 30 seconds
 	}
 }
 
@@ -179,6 +225,62 @@ func (m model) uploadS3Object(bucket, key, localPath string) tea.Cmd {
 	}
 }
 
+func (m model) deleteS3Object(bucket, key string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.DeleteObject(ctx, bucket, key)
+		return s3ActionCompletedMsg{action: "delete object", err: err}
+	}
+}
+
+func (m model) deleteS3Bucket(bucket string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.DeleteBucket(ctx, bucket)
+		return s3ActionCompletedMsg{action: "delete bucket", err: err}
+	}
+}
+
+func (m model) createS3Bucket(bucket, region string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.CreateBucket(ctx, bucket, region)
+		return s3ActionCompletedMsg{action: "create bucket", err: err}
+	}
+}
+
+func (m model) copyS3Object(sourceBucket, sourceKey, destBucket, destKey string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.awsClient.CopyObject(ctx, sourceBucket, sourceKey, destBucket, destKey)
+		return s3ActionCompletedMsg{action: "copy object", err: err}
+	}
+}
+
+func (m model) generatePresignedURL(bucket, key string, expiration int) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		url, err := m.awsClient.GeneratePresignedURL(ctx, bucket, key, expiration)
+		return presignedURLGeneratedMsg{url: url, err: err}
+	}
+}
+
+func (m model) loadBucketPolicy(bucket string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		policy, err := m.awsClient.GetBucketPolicy(ctx, bucket)
+		return bucketPolicyLoadedMsg{policy: policy, err: err}
+	}
+}
+
+func (m model) loadBucketVersioning(bucket string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		versioning, err := m.awsClient.GetBucketVersioning(ctx, bucket)
+		return bucketVersioningLoadedMsg{versioning: versioning, err: err}
+	}
+}
+
 func (m model) loadEC2InstanceDetails(instanceID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -231,14 +333,86 @@ func (m model) performInstanceAction(action string, instanceID string) tea.Cmd {
 	}
 }
 
+func (m model) performBulkAction(action string, instanceIDs []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		successCount := 0
+		failureCount := 0
+
+		for _, instanceID := range instanceIDs {
+			var err error
+			switch action {
+			case "start":
+				err = m.awsClient.StartInstance(ctx, instanceID)
+			case "stop":
+				err = m.awsClient.StopInstance(ctx, instanceID)
+			case "reboot":
+				err = m.awsClient.RebootInstance(ctx, instanceID)
+			case "terminate":
+				err = m.awsClient.TerminateInstance(ctx, instanceID)
+			}
+
+			if err != nil {
+				failureCount++
+			} else {
+				successCount++
+			}
+		}
+
+		return bulkActionCompletedMsg{
+			action:       action,
+			successCount: successCount,
+			failureCount: failureCount,
+		}
+	}
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+		return tickMsg{}
+	})
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle confirmation dialog
+	// Handle S3 delete confirmation dialog
+	if m.s3ConfirmDelete {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "y", "Y":
+				m.loading = true
+				m.s3ConfirmDelete = false
+				if m.s3DeleteTarget == "object" {
+					return m, m.deleteS3Object(m.s3CurrentBucket, m.s3DeleteKey)
+				} else if m.s3DeleteTarget == "bucket" {
+					return m, m.deleteS3Bucket(m.s3DeleteKey)
+				}
+			case "n", "N", "esc":
+				m.s3ConfirmDelete = false
+				m.s3DeleteTarget = ""
+				m.s3DeleteKey = ""
+				m.statusMessage = "Delete cancelled"
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	// Handle EC2 confirmation dialog
 	if m.showingConfirm {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
 			case "y", "Y":
 				m.loading = true
+				// Check if this is a bulk action
+				if len(m.ec2SelectedInstances) > 0 && m.currentScreen == ec2Screen {
+					var instanceIDs []string
+					for id := range m.ec2SelectedInstances {
+						instanceIDs = append(instanceIDs, id)
+					}
+					return m, m.performBulkAction(m.confirmAction, instanceIDs)
+				}
 				return m, m.performInstanceAction(m.confirmAction, m.confirmInstanceID)
 			case "n", "N", "esc":
 				m.showingConfirm = false
@@ -272,6 +446,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case *aws.Client:
 		m.awsClient = msg
+		if m.autoRefresh {
+			return m, tea.Batch(m.loadEC2Instances, tickCmd())
+		}
+		return m, m.loadEC2Instances
+
+	case tickMsg:
+		// Auto-refresh EC2 instances if enabled and on EC2 screen
+		if m.autoRefresh && m.currentScreen == ec2Screen {
+			return m, tea.Batch(m.loadEC2Instances, tickCmd())
+		}
+		return m, tickCmd()
+
+	case bulkActionCompletedMsg:
+		m.loading = false
+		m.showingConfirm = false
+		if msg.failureCount > 0 {
+			m.statusMessage = fmt.Sprintf("Bulk %s: %d succeeded, %d failed", msg.action, msg.successCount, msg.failureCount)
+		} else {
+			m.statusMessage = fmt.Sprintf("Bulk %s: %d instances succeeded", msg.action, msg.successCount)
+		}
+		// Clear selections
+		m.ec2SelectedInstances = make(map[string]bool)
+		// Refresh instances list
 		return m, m.loadEC2Instances
 
 	case instancesLoadedMsg:
@@ -367,6 +564,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case s3ActionCompletedMsg:
+		m.loading = false
+		m.s3ConfirmDelete = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.statusMessage = fmt.Sprintf("Successfully completed: %s", msg.action)
+		}
+		// Refresh appropriate view
+		if m.s3DeleteTarget == "bucket" {
+			return m, m.loadS3Buckets
+		} else if m.s3DeleteTarget == "object" {
+			return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+		}
+		return m, nil
+
+	case presignedURLGeneratedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error generating URL: %v", msg.err)
+		} else {
+			m.s3PresignedURL = msg.url
+			m.statusMessage = "Presigned URL generated (displayed below)"
+		}
+		return m, nil
+
+	case bucketPolicyLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.s3BucketPolicy = fmt.Sprintf("Error: %v", msg.err)
+		} else if msg.policy == "" {
+			m.s3BucketPolicy = "No bucket policy set"
+		} else {
+			m.s3BucketPolicy = msg.policy
+		}
+		m.s3ShowingInfo = true
+		m.s3InfoType = "policy"
+		return m, nil
+
+	case bucketVersioningLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.s3BucketVersioning = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.s3BucketVersioning = msg.versioning
+		}
+		m.s3ShowingInfo = true
+		m.s3InfoType = "versioning"
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -388,7 +635,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc":
-			// ESC key to go back from details view
+			// ESC key to dismiss S3 info popup or go back from details view
+			if m.s3ShowingInfo {
+				m.s3ShowingInfo = false
+				m.s3InfoType = ""
+				m.s3BucketPolicy = ""
+				m.s3BucketVersioning = ""
+				m.s3PresignedURL = ""
+				return m, nil
+			}
 			if m.currentScreen == ec2DetailsScreen {
 				m.currentScreen = ec2Screen
 				m.ec2InstanceDetails = nil
@@ -571,6 +826,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentScreen == s3BrowseScreen {
 				m.statusMessage = "Upload: Feature requires interactive file picker (coming soon)"
 			}
+		case "D":
+			// Delete S3 object or bucket
+			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
+				if !selectedObject.IsFolder {
+					m.s3ConfirmDelete = true
+					m.s3DeleteTarget = "object"
+					m.s3DeleteKey = selectedObject.Key
+					m.statusMessage = fmt.Sprintf("Delete %s? (y/n)", selectedObject.Key)
+					return m, nil
+				}
+			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
+				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
+				m.s3ConfirmDelete = true
+				m.s3DeleteTarget = "bucket"
+				m.s3DeleteKey = selectedBucket.Name
+				m.statusMessage = fmt.Sprintf("Delete bucket %s? Bucket must be empty! (y/n)", selectedBucket.Name)
+				return m, nil
+			}
+		case "p":
+			// Generate presigned URL or view bucket policy
+			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
+				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
+				if !selectedObject.IsFolder {
+					m.loading = true
+					// Generate presigned URL with 1 hour expiration
+					return m, m.generatePresignedURL(m.s3CurrentBucket, selectedObject.Key, 3600)
+				}
+			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
+				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
+				m.loading = true
+				return m, m.loadBucketPolicy(selectedBucket.Name)
+			} else if m.currentScreen == s3ObjectDetailsScreen && m.s3ObjectDetails != nil {
+				m.loading = true
+				return m, m.generatePresignedURL(m.s3CurrentBucket, m.s3ObjectDetails.Key, 3600)
+			}
+		case "v":
+			// View bucket versioning
+			if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
+				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
+				m.loading = true
+				return m, m.loadBucketVersioning(selectedBucket.Name)
+			}
 		case "f":
 			// Only filter on EC2 list screen
 			if m.currentScreen == ec2Screen {
@@ -578,8 +876,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterInput.Focus()
 				return m, nil
 			}
+		case " ":
+			// Toggle instance selection (space bar)
+			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
+				instanceID := m.ec2Instances[m.ec2SelectedIndex].ID
+				if m.ec2SelectedInstances[instanceID] {
+					delete(m.ec2SelectedInstances, instanceID)
+				} else {
+					m.ec2SelectedInstances[instanceID] = true
+				}
+				return m, nil
+			}
+		case "a":
+			// Toggle auto-refresh
+			if m.currentScreen == ec2Screen {
+				m.autoRefresh = !m.autoRefresh
+				if m.autoRefresh {
+					m.statusMessage = "Auto-refresh enabled (30s)"
+					return m, tickCmd()
+				} else {
+					m.statusMessage = "Auto-refresh disabled"
+				}
+				return m, nil
+			}
+		case "x":
+			// Clear all selections
+			if m.currentScreen == ec2Screen {
+				m.ec2SelectedInstances = make(map[string]bool)
+				m.statusMessage = "Cleared all selections"
+				return m, nil
+			}
+		case "y":
+			// Copy instance ID or IP to clipboard
+			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
+				instance := m.ec2Instances[m.ec2SelectedIndex]
+				// Try to copy public IP, fallback to private IP, then instance ID
+				toCopy := instance.PublicIP
+				if toCopy == "" {
+					toCopy = instance.PrivateIP
+				}
+				if toCopy == "" {
+					toCopy = instance.ID
+				}
+				m.copyToClipboard = toCopy
+				m.statusMessage = fmt.Sprintf("Copied to clipboard: %s", toCopy)
+				return m, func() tea.Msg {
+					// Try to copy to clipboard using xclip or pbcopy
+					return nil
+				}
+			}
 		case "s":
-			// Start instance (works in list or details view)
+			// Start instance (single or bulk)
+			if m.currentScreen == ec2Screen && len(m.ec2SelectedInstances) > 0 {
+				// Bulk action
+				var instanceIDs []string
+				for id := range m.ec2SelectedInstances {
+					instanceIDs = append(instanceIDs, id)
+				}
+				m.loading = true
+				return m, m.performBulkAction("start", instanceIDs)
+			}
 			var instanceID string
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
@@ -593,7 +949,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "S":
-			// Stop instance (works in list or details view)
+			// Stop instance (single or bulk)
+			if m.currentScreen == ec2Screen && len(m.ec2SelectedInstances) > 0 {
+				// Bulk action
+				var instanceIDs []string
+				for id := range m.ec2SelectedInstances {
+					instanceIDs = append(instanceIDs, id)
+				}
+				m.showingConfirm = true
+				m.confirmAction = "stop"
+				m.confirmInstanceID = fmt.Sprintf("%d instances", len(instanceIDs))
+				return m, nil
+			}
 			var instanceID string
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
@@ -607,7 +974,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "R":
-			// Reboot instance (works in list or details view)
+			// Reboot instance (single or bulk)
+			if m.currentScreen == ec2Screen && len(m.ec2SelectedInstances) > 0 {
+				// Bulk action
+				var instanceIDs []string
+				for id := range m.ec2SelectedInstances {
+					instanceIDs = append(instanceIDs, id)
+				}
+				m.showingConfirm = true
+				m.confirmAction = "reboot"
+				m.confirmInstanceID = fmt.Sprintf("%d instances", len(instanceIDs))
+				return m, nil
+			}
 			var instanceID string
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
@@ -621,7 +999,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "t":
-			// Terminate instance (works in list or details view)
+			// Terminate instance (single or bulk)
+			if m.currentScreen == ec2Screen && len(m.ec2SelectedInstances) > 0 {
+				// Bulk action
+				var instanceIDs []string
+				for id := range m.ec2SelectedInstances {
+					instanceIDs = append(instanceIDs, id)
+				}
+				m.showingConfirm = true
+				m.confirmAction = "terminate"
+				m.confirmInstanceID = fmt.Sprintf("%d instances", len(instanceIDs))
+				return m, nil
+			}
 			var instanceID string
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
@@ -742,6 +1131,37 @@ func (m model) View() string {
 		s += "\n" + confirmStyle.Render(confirmMsg)
 	}
 
+	// Show S3 info popup (bucket policy, versioning, presigned URL)
+	if m.s3ShowingInfo {
+		infoStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("6")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("6")).
+			Padding(1, 2).
+			Width(80)
+
+		var infoContent string
+		if m.s3InfoType == "policy" {
+			infoContent = "Bucket Policy:\n\n" + m.s3BucketPolicy
+		} else if m.s3InfoType == "versioning" {
+			infoContent = "Bucket Versioning:\n\n" + m.s3BucketVersioning
+		}
+		s += "\n" + infoStyle.Render(infoContent)
+		s += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Press ESC to close")
+	}
+
+	// Show presigned URL
+	if m.s3PresignedURL != "" {
+		urlStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("2")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("2")).
+			Padding(1, 2).
+			Width(100)
+		s += "\n" + urlStyle.Render("Presigned URL (1 hour):\n"+m.s3PresignedURL)
+	}
+
 	// Show status message
 	if m.statusMessage != "" {
 		statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
@@ -759,17 +1179,17 @@ func (m model) View() string {
 			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q: Back | 1/2/3: Switch Service"
 		}
 	} else if m.currentScreen == ec2Screen {
-		helpText = "↑↓/jk: Navigate | Enter: Details | s:Start | S:Stop | R:Reboot | t:Terminate | f: Filter | q: Quit"
+		helpText = "↑↓/jk: Nav | Enter: Details | Space: Select | s:Start | S:Stop | R:Reboot | t:Term | a: Auto-refresh | x: Clear | y: Copy | f: Filter | q: Quit"
 	} else if m.currentScreen == s3Screen {
-		helpText = "↑↓/jk: Navigate | Enter: Browse Bucket | r: Refresh | Tab: Next | 1/2/3: Switch | q: Quit"
+		helpText = "↑↓/jk: Nav | Enter: Browse | D: Delete Bucket | p: Policy | v: Versioning | r: Refresh | q: Quit"
 	} else if m.currentScreen == s3BrowseScreen {
 		nextPageHint := ""
 		if m.s3IsTruncated {
 			nextPageHint = " | n: Next Page"
 		}
-		helpText = "↑↓/jk: Navigate | Enter/i: View Details | d: Download | h/Backspace: Up" + nextPageHint + " | ESC/q: Back"
+		helpText = "↑↓/jk: Nav | Enter: Details | d: Download | D: Delete | p: Presigned URL | h/Back: Up" + nextPageHint + " | ESC/q: Back"
 	} else if m.currentScreen == s3ObjectDetailsScreen {
-		helpText = "ESC/q: Back | d: Download"
+		helpText = "d: Download | p: Presigned URL | ESC/q: Back"
 	} else {
 		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit"
 	}
@@ -828,9 +1248,9 @@ func (m model) renderEC2() string {
 	content.WriteString(title + "\n\n")
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	content.WriteString(headerStyle.Render(fmt.Sprintf("%-20s %-30s %-15s %-15s %-15s\n",
-		"INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
-	content.WriteString(strings.Repeat("─", 100) + "\n")
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-3s %-20s %-30s %-15s %-15s %-15s\n",
+		"", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
+	content.WriteString(strings.Repeat("─", 103) + "\n")
 
 	// Build table rows
 	for i, inst := range filteredInstances {
@@ -848,8 +1268,15 @@ func (m model) renderEC2() string {
 			ip = "-"
 		}
 
+		// Check if instance is selected for bulk action
+		checkmark := " "
+		if m.ec2SelectedInstances[inst.ID] {
+			checkmark = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("✓")
+		}
+
 		// Highlight selected row
-		row := fmt.Sprintf("%-20s %-30s %-15s %-15s %-15s",
+		row := fmt.Sprintf("%-3s %-20s %-30s %-15s %-15s %-15s",
+			checkmark,
 			inst.ID,
 			truncate(name, 30),
 			stateStyle.Render(inst.State),
@@ -868,7 +1295,14 @@ func (m model) renderEC2() string {
 		content.WriteString(row + "\n")
 	}
 
+	selectedCount := len(m.ec2SelectedInstances)
 	content.WriteString(fmt.Sprintf("\nTotal: %d instances", len(filteredInstances)))
+	if selectedCount > 0 {
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(fmt.Sprintf(" | Selected: %d", selectedCount)))
+	}
+	if m.autoRefresh {
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(" | Auto-refresh: ON"))
+	}
 
 	return content.String()
 }

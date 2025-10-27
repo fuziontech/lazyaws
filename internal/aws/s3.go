@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -15,6 +16,8 @@ type Bucket struct {
 	Name         string
 	CreationDate string
 	Region       string
+	Size         int64 // Total size in bytes
+	ObjectCount  int64 // Total number of objects
 }
 
 // S3Object represents an object or folder in an S3 bucket
@@ -295,4 +298,128 @@ func (c *Client) GetObjectDetails(ctx context.Context, bucketName, key string) (
 	}
 
 	return details, nil
+}
+
+// DeleteObject deletes an S3 object
+func (c *Client) DeleteObject(ctx context.Context, bucketName, key string) error {
+	input := &s3.DeleteObjectInput{
+		Bucket: &bucketName,
+		Key:    &key,
+	}
+
+	_, err := c.S3.DeleteObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to delete object: %w", err)
+	}
+
+	return nil
+}
+
+// CopyObject copies an S3 object to another location
+func (c *Client) CopyObject(ctx context.Context, sourceBucket, sourceKey, destBucket, destKey string) error {
+	copySource := fmt.Sprintf("%s/%s", sourceBucket, sourceKey)
+	input := &s3.CopyObjectInput{
+		Bucket:     &destBucket,
+		CopySource: &copySource,
+		Key:        &destKey,
+	}
+
+	_, err := c.S3.CopyObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to copy object: %w", err)
+	}
+
+	return nil
+}
+
+// CreateBucket creates a new S3 bucket
+func (c *Client) CreateBucket(ctx context.Context, bucketName, region string) error {
+	input := &s3.CreateBucketInput{
+		Bucket: &bucketName,
+	}
+
+	// If not us-east-1, set location constraint
+	if region != "us-east-1" && region != "" {
+		input.CreateBucketConfiguration = &types.CreateBucketConfiguration{
+			LocationConstraint: types.BucketLocationConstraint(region),
+		}
+	}
+
+	_, err := c.S3.CreateBucket(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteBucket deletes an S3 bucket (must be empty)
+func (c *Client) DeleteBucket(ctx context.Context, bucketName string) error {
+	input := &s3.DeleteBucketInput{
+		Bucket: &bucketName,
+	}
+
+	_, err := c.S3.DeleteBucket(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to delete bucket: %w", err)
+	}
+
+	return nil
+}
+
+// GetBucketPolicy retrieves the bucket policy
+func (c *Client) GetBucketPolicy(ctx context.Context, bucketName string) (string, error) {
+	input := &s3.GetBucketPolicyInput{
+		Bucket: &bucketName,
+	}
+
+	result, err := c.S3.GetBucketPolicy(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get bucket policy: %w", err)
+	}
+
+	if result.Policy == nil {
+		return "", nil
+	}
+
+	return *result.Policy, nil
+}
+
+// GetBucketVersioning retrieves the versioning configuration
+func (c *Client) GetBucketVersioning(ctx context.Context, bucketName string) (string, error) {
+	input := &s3.GetBucketVersioningInput{
+		Bucket: &bucketName,
+	}
+
+	result, err := c.S3.GetBucketVersioning(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get bucket versioning: %w", err)
+	}
+
+	if result.Status == "" {
+		return "Disabled", nil
+	}
+
+	return string(result.Status), nil
+}
+
+// GeneratePresignedURL generates a presigned URL for an S3 object
+func (c *Client) GeneratePresignedURL(ctx context.Context, bucketName, key string, expirationSeconds int) (string, error) {
+	// Create a presign client
+	presignClient := s3.NewPresignClient(c.S3)
+
+	input := &s3.GetObjectInput{
+		Bucket: &bucketName,
+		Key:    &key,
+	}
+
+	// Generate presigned URL with expiration
+	presignResult, err := presignClient.PresignGetObject(ctx, input, func(opts *s3.PresignOptions) {
+		opts.Expires = time.Duration(expirationSeconds) * time.Second
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to generate presigned URL: %w", err)
+	}
+
+	return presignResult.URL, nil
 }
