@@ -1442,8 +1442,8 @@ func (m *model) ensureVisible(selectedIndex, listLength int) {
 	// Calculate available height for the list data rows only
 	// Account for: k9s header (9 lines), content border/padding (4 lines),
 	//              table title+header (2 lines), footer info (2 lines), breadcrumb (1 line),
-	//              extra spacing (1 line)
-	availableHeight := m.height - 19
+	//              extra spacing (1 line), vim command line (2 lines), status message (1 line)
+	availableHeight := m.height - 22
 	if availableHeight < 5 {
 		availableHeight = 5 // Minimum viewport size
 	}
@@ -1538,12 +1538,19 @@ func (m model) View() string {
 	s += m.renderK9sHeader() + "\n"
 
 	// Content area
-	// Don't set a fixed height - let content flow naturally
-	// The viewport scrolling in renderEC2/renderS3 handles visible items
+	// Set max height to prevent overflow and top clipping
+	// Account for: k9s header (9 lines), breadcrumb (1 line), vim command (2 lines),
+	//              status message (1 line), spacing (2 lines)
+	maxContentHeight := m.height - 15
+	if maxContentHeight < 10 {
+		maxContentHeight = 10
+	}
+
 	contentStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
-		Padding(1, 2)
+		Padding(1, 2).
+		MaxHeight(maxContentHeight)
 
 	var content string
 	switch m.currentScreen {
@@ -1793,18 +1800,21 @@ func (m model) renderK9sHeader() string {
 
 	var header strings.Builder
 	for i := 0; i < maxLines; i++ {
+		// Build the line in a temporary buffer to measure and truncate if needed
+		var line strings.Builder
+
 		// Left side (fixed width ~30 chars)
 		left := ""
 		if i < len(leftLines) {
 			left = leftLines[i]
 		}
-		header.WriteString(left)
+		line.WriteString(left)
 
 		// Padding to align
 		leftWidth := lipgloss.Width(left)
 		padding := 30 - leftWidth
 		if padding > 0 {
-			header.WriteString(strings.Repeat(" ", padding))
+			line.WriteString(strings.Repeat(" ", padding))
 		}
 
 		// Right side key hints (middle section)
@@ -1812,18 +1822,41 @@ func (m model) renderK9sHeader() string {
 		if i < len(rightLines) {
 			right = rightLines[i]
 		}
-		header.WriteString(right)
+		line.WriteString(right)
 
-		// Logo on far right
-		if i < len(logoLines) {
+		// Logo on far right - but ensure we don't overflow terminal width
+		if i < len(logoLines) && m.width > 0 {
 			rightWidth := lipgloss.Width(right)
-			logoPadding := 90 - rightWidth
-			if logoPadding > 0 {
-				header.WriteString(strings.Repeat(" ", logoPadding))
+			// Calculate how much space we've used: left (30) + right
+			usedWidth := 30 + rightWidth
+			// Only add logo if we have room (need at least 30 chars for logo)
+			if usedWidth+30 < m.width {
+				logoPadding := 90 - rightWidth
+				if logoPadding > 0 && logoPadding < 100 { // Sanity check
+					line.WriteString(strings.Repeat(" ", logoPadding))
+				}
+				line.WriteString(labelStyle.Render(logoLines[i]))
 			}
-			header.WriteString(labelStyle.Render(logoLines[i]))
 		}
 
+		// Truncate line to terminal width if needed
+		lineStr := line.String()
+		lineWidth := lipgloss.Width(lineStr)
+		if m.width > 0 && lineWidth > m.width {
+			// Line is too long, truncate it
+			// This is tricky with ANSI codes, so just skip the logo for this line
+			var safeLine strings.Builder
+			safeLine.WriteString(left)
+			if padding > 0 {
+				safeLine.WriteString(strings.Repeat(" ", padding))
+			}
+			safeLine.WriteString(right)
+			lineStr = safeLine.String()
+		}
+
+		header.WriteString(lineStr)
+		// Add ANSI clear-to-end-of-line to prevent any artifacts
+		header.WriteString("\x1b[K")
 		header.WriteString("\n")
 	}
 
@@ -1955,8 +1988,8 @@ func (m model) renderEC2() string {
 
 	// Table header - k9s uses uppercase and symbols
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
-	content.WriteString(headerStyle.Render(fmt.Sprintf("%-1s  %-20s %-30s %-15s %-15s %-15s\n",
-		"✓", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-1s  %-20s %-30s %-15s %-15s %-15s",
+		"✓", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")) + "\n")
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
@@ -2321,8 +2354,8 @@ func (m model) renderS3() string {
 
 	// Table header
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
-	content.WriteString(headerStyle.Render(fmt.Sprintf("%-40s %-25s %-20s\n",
-		"BUCKET NAME", "CREATION DATE", "REGION")))
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-40s %-25s %-20s",
+		"BUCKET NAME", "CREATION DATE", "REGION")) + "\n")
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
@@ -2435,8 +2468,8 @@ func (m model) renderS3Browse() string {
 
 	// Table header
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
-	content.WriteString(headerStyle.Render(fmt.Sprintf("%-6s %-50s %-15s %-25s %-20s\n",
-		"TYPE", "NAME", "SIZE", "LAST MODIFIED", "STORAGE CLASS")))
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-6s %-50s %-15s %-25s %-20s",
+		"TYPE", "NAME", "SIZE", "LAST MODIFIED", "STORAGE CLASS")) + "\n")
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
