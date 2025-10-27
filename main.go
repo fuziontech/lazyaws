@@ -868,13 +868,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc":
-			// ESC key to dismiss S3 info popup or clear search or go back from details view
+			// ESC key to dismiss S3 info popup or clear presigned URL or clear search or go back from details view
 			if m.s3ShowingInfo {
 				m.s3ShowingInfo = false
 				m.s3InfoType = ""
 				m.s3BucketPolicy = ""
 				m.s3BucketVersioning = ""
 				m.s3PresignedURL = ""
+				return m, nil
+			}
+			// Clear presigned URL if showing
+			if m.s3PresignedURL != "" {
+				m.s3PresignedURL = ""
+				m.statusMessage = "Presigned URL cleared"
 				return m, nil
 			}
 			// Clear active search filter
@@ -1913,15 +1919,11 @@ func (m model) View() string {
 		s += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Press ESC to close")
 	}
 
-	// Show presigned URL
-	if m.s3PresignedURL != "" {
-		urlStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("2")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("2")).
-			Padding(1, 2).
-			Width(100)
-		s += "\n" + urlStyle.Render("Presigned URL (1 hour):\n"+m.s3PresignedURL)
+	// Show presigned URL (only on non-macOS platforms, since macOS auto-copies)
+	if m.s3PresignedURL != "" && runtime.GOOS != "darwin" {
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+		urlStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+		s += "\n" + labelStyle.Render("Presigned URL (1 hour): ") + urlStyle.Render(m.s3PresignedURL)
 	}
 
 	// Show status message
