@@ -29,17 +29,17 @@
   - [x] Display network interfaces
 
 ### EC2 Actions
-- [ ] Instance state management
-  - [ ] Start instances
-  - [ ] Stop instances (with confirmation)
-  - [ ] Restart instances
-  - [ ] Terminate instances (with double confirmation)
-- [ ] Health checks
-  - [ ] Show system status checks
-  - [ ] Show instance status checks
-  - [ ] Display CloudWatch metrics (CPU, network, etc.)
-- [ ] SSM integration
-  - [ ] Check SSM connectivity status
+- [x] Instance state management
+  - [x] Start instances
+  - [x] Stop instances (with confirmation)
+  - [x] Restart instances
+  - [x] Terminate instances (with confirmation)
+- [x] Health checks
+  - [x] Show system status checks
+  - [x] Show instance status checks
+  - [x] Display CloudWatch metrics (CPU, network, etc.)
+- [x] SSM integration
+  - [x] Check SSM connectivity status
   - [ ] Launch SSM session in new terminal
   - [ ] Support for SSM port forwarding
 

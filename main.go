@@ -30,12 +30,19 @@ type model struct {
 	ec2Instances        []aws.Instance
 	ec2SelectedIndex    int
 	ec2InstanceDetails  *aws.InstanceDetails
+	ec2InstanceStatus   *aws.InstanceStatus
+	ec2InstanceMetrics  *aws.InstanceMetrics
+	ec2SSMStatus        *aws.SSMConnectionStatus
 	loading             bool
 	err                 error
 	config              *config.Config
 	filterInput         textinput.Model
 	filtering           bool
 	filter              string
+	confirmAction       string
+	confirmInstanceID   string
+	showingConfirm      bool
+	statusMessage       string
 }
 
 type instancesLoadedMsg struct {
@@ -46,6 +53,26 @@ type instancesLoadedMsg struct {
 type instanceDetailsLoadedMsg struct {
 	details *aws.InstanceDetails
 	err     error
+}
+
+type instanceStatusLoadedMsg struct {
+	status *aws.InstanceStatus
+	err    error
+}
+
+type instanceMetricsLoadedMsg struct {
+	metrics *aws.InstanceMetrics
+	err     error
+}
+
+type ssmStatusLoadedMsg struct {
+	status *aws.SSMConnectionStatus
+	err    error
+}
+
+type instanceActionCompletedMsg struct {
+	action string
+	err    error
 }
 
 func initialModel(cfg *config.Config) model {
@@ -91,7 +118,70 @@ func (m model) loadEC2InstanceDetails(instanceID string) tea.Cmd {
 	}
 }
 
+func (m model) loadInstanceStatus(instanceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		status, err := m.awsClient.GetInstanceStatus(ctx, instanceID)
+		return instanceStatusLoadedMsg{status: status, err: err}
+	}
+}
+
+func (m model) loadInstanceMetrics(instanceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		metrics, err := m.awsClient.GetInstanceMetrics(ctx, instanceID)
+		return instanceMetricsLoadedMsg{metrics: metrics, err: err}
+	}
+}
+
+func (m model) loadSSMStatus(instanceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		status, err := m.awsClient.CheckSSMConnectivity(ctx, instanceID)
+		return ssmStatusLoadedMsg{status: status, err: err}
+	}
+}
+
+func (m model) performInstanceAction(action string, instanceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var err error
+
+		switch action {
+		case "start":
+			err = m.awsClient.StartInstance(ctx, instanceID)
+		case "stop":
+			err = m.awsClient.StopInstance(ctx, instanceID)
+		case "reboot":
+			err = m.awsClient.RebootInstance(ctx, instanceID)
+		case "terminate":
+			err = m.awsClient.TerminateInstance(ctx, instanceID)
+		}
+
+		return instanceActionCompletedMsg{action: action, err: err}
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle confirmation dialog
+	if m.showingConfirm {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "y", "Y":
+				m.loading = true
+				return m, m.performInstanceAction(m.confirmAction, m.confirmInstanceID)
+			case "n", "N", "esc":
+				m.showingConfirm = false
+				m.confirmAction = ""
+				m.confirmInstanceID = ""
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	// Handle filtering
 	if m.filtering {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
@@ -130,8 +220,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.ec2InstanceDetails = msg.details
 			m.currentScreen = ec2DetailsScreen
+			// Load additional information for details view
+			instanceID := msg.details.ID
+			return m, tea.Batch(
+				m.loadInstanceStatus(instanceID),
+				m.loadInstanceMetrics(instanceID),
+				m.loadSSMStatus(instanceID),
+			)
 		}
 		return m, nil
+
+	case instanceStatusLoadedMsg:
+		if msg.err == nil {
+			m.ec2InstanceStatus = msg.status
+		}
+		return m, nil
+
+	case instanceMetricsLoadedMsg:
+		if msg.err == nil {
+			m.ec2InstanceMetrics = msg.metrics
+		}
+		return m, nil
+
+	case ssmStatusLoadedMsg:
+		if msg.err == nil {
+			m.ec2SSMStatus = msg.status
+		}
+		return m, nil
+
+	case instanceActionCompletedMsg:
+		m.loading = false
+		m.showingConfirm = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.statusMessage = fmt.Sprintf("Successfully %sed instance", msg.action)
+		}
+		// Refresh instances list
+		return m, m.loadEC2Instances
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -216,6 +342,62 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterInput.Focus()
 				return m, nil
 			}
+		case "s":
+			// Start instance (works in list or details view)
+			var instanceID string
+			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
+				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
+			} else if m.currentScreen == ec2DetailsScreen && m.ec2InstanceDetails != nil {
+				instanceID = m.ec2InstanceDetails.ID
+			}
+			if instanceID != "" {
+				m.showingConfirm = true
+				m.confirmAction = "start"
+				m.confirmInstanceID = instanceID
+				return m, nil
+			}
+		case "S":
+			// Stop instance (works in list or details view)
+			var instanceID string
+			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
+				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
+			} else if m.currentScreen == ec2DetailsScreen && m.ec2InstanceDetails != nil {
+				instanceID = m.ec2InstanceDetails.ID
+			}
+			if instanceID != "" {
+				m.showingConfirm = true
+				m.confirmAction = "stop"
+				m.confirmInstanceID = instanceID
+				return m, nil
+			}
+		case "R":
+			// Reboot instance (works in list or details view)
+			var instanceID string
+			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
+				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
+			} else if m.currentScreen == ec2DetailsScreen && m.ec2InstanceDetails != nil {
+				instanceID = m.ec2InstanceDetails.ID
+			}
+			if instanceID != "" {
+				m.showingConfirm = true
+				m.confirmAction = "reboot"
+				m.confirmInstanceID = instanceID
+				return m, nil
+			}
+		case "t":
+			// Terminate instance (works in list or details view)
+			var instanceID string
+			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
+				instanceID = m.ec2Instances[m.ec2SelectedIndex].ID
+			} else if m.currentScreen == ec2DetailsScreen && m.ec2InstanceDetails != nil {
+				instanceID = m.ec2InstanceDetails.ID
+			}
+			if instanceID != "" {
+				m.showingConfirm = true
+				m.confirmAction = "terminate"
+				m.confirmInstanceID = instanceID
+				return m, nil
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -290,13 +472,38 @@ func (m model) View() string {
 
 	s += contentStyle.Render(content) + "\n"
 
+	// Show confirmation dialog
+	if m.showingConfirm {
+		confirmStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("3")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("3")).
+			Padding(1, 2)
+
+		actionText := m.confirmAction
+		if m.confirmAction == "terminate" {
+			actionText = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true).Render("TERMINATE")
+		}
+
+		confirmMsg := fmt.Sprintf("Are you sure you want to %s instance %s?\n\n(y)es / (n)o",
+			actionText, m.confirmInstanceID)
+		s += "\n" + confirmStyle.Render(confirmMsg)
+	}
+
+	// Show status message
+	if m.statusMessage != "" {
+		statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		s += "\n" + statusStyle.Render(m.statusMessage)
+	}
+
 	// Footer
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	var helpText string
 	if m.currentScreen == ec2DetailsScreen {
-		helpText = "ESC/q: Back | 1/2/3: Switch Service"
+		helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q: Back | 1/2/3: Switch Service"
 	} else if m.currentScreen == ec2Screen {
-		helpText = "↑↓/jk: Navigate | Enter: Details | Tab: Next | c: Region | r: Refresh | f: Filter | q: Quit"
+		helpText = "↑↓/jk: Navigate | Enter: Details | s:Start | S:Stop | R:Reboot | t:Terminate | f: Filter | q: Quit"
 	} else {
 		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit"
 	}
@@ -503,6 +710,92 @@ func (m model) renderEC2Details() string {
 			}
 			content.WriteString("\n")
 		}
+	}
+
+	// Health Status
+	if m.ec2InstanceStatus != nil {
+		content.WriteString(sectionStyle.Render("Health Status") + "\n")
+
+		// System status
+		systemStatusColor := lipgloss.Color("1") // Red by default
+		if m.ec2InstanceStatus.SystemStatusOk {
+			systemStatusColor = lipgloss.Color("2") // Green
+		}
+		systemStatusStyle := lipgloss.NewStyle().Foreground(systemStatusColor)
+		content.WriteString(labelStyle.Render("  System Status:   ") +
+			systemStatusStyle.Render(m.ec2InstanceStatus.SystemStatus) + "\n")
+
+		// Instance status
+		instanceStatusColor := lipgloss.Color("1") // Red by default
+		if m.ec2InstanceStatus.InstanceStatusOk {
+			instanceStatusColor = lipgloss.Color("2") // Green
+		}
+		instanceStatusStyle := lipgloss.NewStyle().Foreground(instanceStatusColor)
+		content.WriteString(labelStyle.Render("  Instance Status: ") +
+			instanceStatusStyle.Render(m.ec2InstanceStatus.InstanceStatus) + "\n")
+
+		// Scheduled events
+		if len(m.ec2InstanceStatus.ScheduledEvents) > 0 {
+			content.WriteString(labelStyle.Render("  Scheduled Events:\n"))
+			for _, event := range m.ec2InstanceStatus.ScheduledEvents {
+				content.WriteString(labelStyle.Render(fmt.Sprintf("    • %s: %s\n",
+					event.Code, event.Description)))
+				if event.NotBefore != "" {
+					content.WriteString(labelStyle.Render(fmt.Sprintf("      Start: %s\n",
+						event.NotBefore)))
+				}
+			}
+		}
+		content.WriteString("\n")
+	}
+
+	// CloudWatch Metrics
+	if m.ec2InstanceMetrics != nil {
+		content.WriteString(sectionStyle.Render("CloudWatch Metrics (Last 5 Minutes)") + "\n")
+		content.WriteString(labelStyle.Render("  CPU Utilization: ") +
+			valueStyle.Render(fmt.Sprintf("%.2f%%", m.ec2InstanceMetrics.CPUUtilization)) + "\n")
+		content.WriteString(labelStyle.Render("  Network In:      ") +
+			valueStyle.Render(fmt.Sprintf("%.2f MB", m.ec2InstanceMetrics.NetworkIn/1024/1024)) + "\n")
+		content.WriteString(labelStyle.Render("  Network Out:     ") +
+			valueStyle.Render(fmt.Sprintf("%.2f MB", m.ec2InstanceMetrics.NetworkOut/1024/1024)) + "\n")
+		if m.ec2InstanceMetrics.DiskReadBytes > 0 || m.ec2InstanceMetrics.DiskWriteBytes > 0 {
+			content.WriteString(labelStyle.Render("  Disk Read:       ") +
+				valueStyle.Render(fmt.Sprintf("%.2f MB", m.ec2InstanceMetrics.DiskReadBytes/1024/1024)) + "\n")
+			content.WriteString(labelStyle.Render("  Disk Write:      ") +
+				valueStyle.Render(fmt.Sprintf("%.2f MB", m.ec2InstanceMetrics.DiskWriteBytes/1024/1024)) + "\n")
+		}
+		content.WriteString("\n")
+	}
+
+	// SSM Connectivity
+	if m.ec2SSMStatus != nil {
+		content.WriteString(sectionStyle.Render("Systems Manager (SSM)") + "\n")
+		if m.ec2SSMStatus.Connected {
+			connectStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+			content.WriteString(labelStyle.Render("  Status:          ") +
+				connectStyle.Render("Connected") + "\n")
+			content.WriteString(labelStyle.Render("  Ping Status:     ") +
+				valueStyle.Render(m.ec2SSMStatus.PingStatus) + "\n")
+			if m.ec2SSMStatus.AgentVersion != "" {
+				content.WriteString(labelStyle.Render("  Agent Version:   ") +
+					valueStyle.Render(m.ec2SSMStatus.AgentVersion) + "\n")
+			}
+			if m.ec2SSMStatus.PlatformName != "" {
+				content.WriteString(labelStyle.Render("  Platform:        ") +
+					valueStyle.Render(m.ec2SSMStatus.PlatformName) + "\n")
+			}
+			if m.ec2SSMStatus.LastPingTime != "" {
+				content.WriteString(labelStyle.Render("  Last Ping:       ") +
+					valueStyle.Render(m.ec2SSMStatus.LastPingTime) + "\n")
+			}
+		} else {
+			disconnectStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+			content.WriteString(labelStyle.Render("  Status:          ") +
+				disconnectStyle.Render("Not Connected") + "\n")
+			content.WriteString(labelStyle.Render("  Note:            ") +
+				valueStyle.Render("SSM agent may not be installed or configured") + "\n")
+		}
+		content.WriteString("\n")
 	}
 
 	// Additional Information

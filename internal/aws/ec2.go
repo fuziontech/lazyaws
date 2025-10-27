@@ -243,3 +243,131 @@ func (c *Client) GetInstanceDetails(ctx context.Context, instanceID string) (*In
 
 	return details, nil
 }
+
+// StartInstance starts a stopped EC2 instance
+func (c *Client) StartInstance(ctx context.Context, instanceID string) error {
+	input := &ec2.StartInstancesInput{
+		InstanceIds: []string{instanceID},
+	}
+
+	_, err := c.EC2.StartInstances(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to start instance: %w", err)
+	}
+
+	return nil
+}
+
+// StopInstance stops a running EC2 instance
+func (c *Client) StopInstance(ctx context.Context, instanceID string) error {
+	input := &ec2.StopInstancesInput{
+		InstanceIds: []string{instanceID},
+	}
+
+	_, err := c.EC2.StopInstances(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to stop instance: %w", err)
+	}
+
+	return nil
+}
+
+// RebootInstance reboots an EC2 instance
+func (c *Client) RebootInstance(ctx context.Context, instanceID string) error {
+	input := &ec2.RebootInstancesInput{
+		InstanceIds: []string{instanceID},
+	}
+
+	_, err := c.EC2.RebootInstances(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to reboot instance: %w", err)
+	}
+
+	return nil
+}
+
+// TerminateInstance terminates an EC2 instance
+func (c *Client) TerminateInstance(ctx context.Context, instanceID string) error {
+	input := &ec2.TerminateInstancesInput{
+		InstanceIds: []string{instanceID},
+	}
+
+	_, err := c.EC2.TerminateInstances(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to terminate instance: %w", err)
+	}
+
+	return nil
+}
+
+// InstanceStatus represents the health status of an EC2 instance
+type InstanceStatus struct {
+	InstanceID         string
+	InstanceState      string
+	SystemStatus       string
+	InstanceStatus     string
+	SystemStatusOk     bool
+	InstanceStatusOk   bool
+	ScheduledEvents    []ScheduledEvent
+}
+
+// ScheduledEvent represents a scheduled maintenance event
+type ScheduledEvent struct {
+	Code        string
+	Description string
+	NotBefore   string
+	NotAfter    string
+}
+
+// GetInstanceStatus retrieves the health status of an EC2 instance
+func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*InstanceStatus, error) {
+	input := &ec2.DescribeInstanceStatusInput{
+		InstanceIds:         []string{instanceID},
+		IncludeAllInstances: &[]bool{true}[0], // Include stopped instances
+	}
+
+	result, err := c.EC2.DescribeInstanceStatus(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe instance status: %w", err)
+	}
+
+	if len(result.InstanceStatuses) == 0 {
+		return nil, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	status := result.InstanceStatuses[0]
+
+	instanceStatus := &InstanceStatus{
+		InstanceID:    getString(status.InstanceId),
+		InstanceState: string(status.InstanceState.Name),
+	}
+
+	// System status
+	if status.SystemStatus != nil && status.SystemStatus.Status != "" {
+		instanceStatus.SystemStatus = string(status.SystemStatus.Status)
+		instanceStatus.SystemStatusOk = (string(status.SystemStatus.Status) == "ok")
+	}
+
+	// Instance status
+	if status.InstanceStatus != nil && status.InstanceStatus.Status != "" {
+		instanceStatus.InstanceStatus = string(status.InstanceStatus.Status)
+		instanceStatus.InstanceStatusOk = (string(status.InstanceStatus.Status) == "ok")
+	}
+
+	// Scheduled events
+	for _, event := range status.Events {
+		scheduledEvent := ScheduledEvent{
+			Code:        string(event.Code),
+			Description: getString(event.Description),
+		}
+		if event.NotBefore != nil {
+			scheduledEvent.NotBefore = event.NotBefore.Format("2006-01-02 15:04:05")
+		}
+		if event.NotAfter != nil {
+			scheduledEvent.NotAfter = event.NotAfter.Format("2006-01-02 15:04:05")
+		}
+		instanceStatus.ScheduledEvents = append(instanceStatus.ScheduledEvents, scheduledEvent)
+	}
+
+	return instanceStatus, nil
+}
