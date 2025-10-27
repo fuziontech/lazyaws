@@ -1531,30 +1531,8 @@ func (m *model) renderWithViewport(content string) string {
 func (m model) View() string {
 	var s string
 
-	// Header with service name and region info
-	var serviceName string
-	switch m.currentScreen {
-	case ec2Screen, ec2DetailsScreen:
-		serviceName = "EC2"
-	case s3Screen, s3BrowseScreen, s3ObjectDetailsScreen:
-		serviceName = "S3"
-	case eksScreen:
-		serviceName = "EKS"
-	}
-
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("2"))
-
-	regionStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("8"))
-
-	header := headerStyle.Render("lazyaws") + " > " + headerStyle.Render(serviceName)
-	if m.awsClient != nil {
-		header += regionStyle.Render(fmt.Sprintf("  [%s]", m.awsClient.GetRegion()))
-	}
-
-	s += header + "\n\n"
+	// K9s-style header: left sidebar with context info, center/right with key hints
+	s += m.renderK9sHeader() + "\n"
 
 	// Content area
 	contentStyle := lipgloss.NewStyle().
@@ -1662,41 +1640,230 @@ func (m model) View() string {
 		s += "\n" + statusStyle.Render(m.statusMessage)
 	}
 
-	// Footer
-	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	var helpText string
-	if m.currentScreen == ec2DetailsScreen {
-		// Show SSM connect option if SSM is connected
-		if m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
-			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | C:SSM Connect | ESC/q/:q: Back"
-		} else {
-			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q/:q: Back"
-		}
-	} else if m.currentScreen == ec2Screen {
-		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | n/N:Next/Prev | Enter: Details | Space: Select | :Commands | q: Quit"
-	} else if m.currentScreen == s3Screen {
-		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | n/N:Next/Prev | Enter: Browse | D: Delete | p: Policy | v: Ver | :Commands | q: Quit"
-	} else if m.currentScreen == s3BrowseScreen {
-		nextPageHint := ""
-		if m.s3IsTruncated {
-			nextPageHint = " | PgDn: Next"
-		}
-		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | Enter: Open | d: Download | D: Delete | h: Up" + nextPageHint + " | :Commands | q: Quit"
-	} else if m.currentScreen == s3ObjectDetailsScreen {
-		helpText = "d: Download | p: Presigned URL | ESC/q/:q: Back"
-	} else {
-		helpText = "c: Change Region | r/:r: Refresh | q/:q: Quit"
-	}
-	s += "\n" + helpStyle.Render(helpText)
-
-	// Add VIM commands help on second line
-	if m.currentScreen == ec2Screen || m.currentScreen == s3Screen || m.currentScreen == s3BrowseScreen {
-		vimHelpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-		vimHelp := "Commands: :ec2 :s3 :eks (switch) | :q (quit) :r (refresh) :sa (select all) :da (deselect) :cf (clear filter) :help (show all)"
-		s += "\n" + vimHelpStyle.Render(vimHelp)
-	}
+	// K9s-style breadcrumb navigation at bottom
+	s += "\n" + m.renderK9sBreadcrumb()
 
 	return s
+}
+
+// renderK9sHeader creates a k9s-style header with context info and key hints
+func (m model) renderK9sHeader() string {
+	// K9s color scheme
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))                 // Yellow/orange
+	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))                 // White
+	keyHintKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Bold(true) // Magenta
+	keyHintActionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))           // Gray
+
+	// Left side: Context information
+	var leftSide strings.Builder
+
+	// Service name (like "Context" in k9s)
+	var serviceName, viewName string
+	switch m.currentScreen {
+	case ec2Screen:
+		serviceName = "EC2"
+		viewName = "Instances"
+	case ec2DetailsScreen:
+		serviceName = "EC2"
+		viewName = "Details"
+	case s3Screen:
+		serviceName = "S3"
+		viewName = "Buckets"
+	case s3BrowseScreen:
+		serviceName = "S3"
+		viewName = "Objects"
+	case s3ObjectDetailsScreen:
+		serviceName = "S3"
+		viewName = "Object Details"
+	case eksScreen:
+		serviceName = "EKS"
+		viewName = "Clusters"
+	}
+
+	leftSide.WriteString(labelStyle.Render("Service: ") + valueStyle.Render(serviceName) + "\n")
+	leftSide.WriteString(labelStyle.Render("View:    ") + valueStyle.Render(viewName) + "\n")
+
+	if m.awsClient != nil {
+		leftSide.WriteString(labelStyle.Render("Region:  ") + valueStyle.Render(m.awsClient.GetRegion()) + "\n")
+	}
+
+	// Add version info (like K9s Rev)
+	leftSide.WriteString(labelStyle.Render("lazyaws: ") + valueStyle.Render("v0.1.0") + "\n")
+
+	// Right side: Key hints based on current screen
+	var keyHints []string
+	switch m.currentScreen {
+	case ec2Screen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Details"),
+			keyHintKeyStyle.Render("<space>") + " " + keyHintActionStyle.Render("Select"),
+			keyHintKeyStyle.Render("<s>") + " " + keyHintActionStyle.Render("Start"),
+			keyHintKeyStyle.Render("<S>") + " " + keyHintActionStyle.Render("Stop"),
+			keyHintKeyStyle.Render("<R>") + " " + keyHintActionStyle.Render("Reboot"),
+			keyHintKeyStyle.Render("<t>") + " " + keyHintActionStyle.Render("Terminate"),
+			keyHintKeyStyle.Render("<:>") + " " + keyHintActionStyle.Render("Command"),
+			keyHintKeyStyle.Render("</>") + " " + keyHintActionStyle.Render("Search"),
+		}
+	case ec2DetailsScreen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<s>") + " " + keyHintActionStyle.Render("Start"),
+			keyHintKeyStyle.Render("<S>") + " " + keyHintActionStyle.Render("Stop"),
+			keyHintKeyStyle.Render("<R>") + " " + keyHintActionStyle.Render("Reboot"),
+			keyHintKeyStyle.Render("<t>") + " " + keyHintActionStyle.Render("Terminate"),
+			keyHintKeyStyle.Render("<esc>") + " " + keyHintActionStyle.Render("Back"),
+		}
+		if m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
+			keyHints = append(keyHints, keyHintKeyStyle.Render("<C>")+" "+keyHintActionStyle.Render("SSM Connect"))
+		}
+	case s3Screen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Browse"),
+			keyHintKeyStyle.Render("<D>") + " " + keyHintActionStyle.Render("Delete"),
+			keyHintKeyStyle.Render("<p>") + " " + keyHintActionStyle.Render("Policy"),
+			keyHintKeyStyle.Render("<v>") + " " + keyHintActionStyle.Render("Versioning"),
+			keyHintKeyStyle.Render("<:>") + " " + keyHintActionStyle.Render("Command"),
+			keyHintKeyStyle.Render("</>") + " " + keyHintActionStyle.Render("Search"),
+		}
+	case s3BrowseScreen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Open"),
+			keyHintKeyStyle.Render("<d>") + " " + keyHintActionStyle.Render("Download"),
+			keyHintKeyStyle.Render("<D>") + " " + keyHintActionStyle.Render("Delete"),
+			keyHintKeyStyle.Render("<h>") + " " + keyHintActionStyle.Render("Up"),
+			keyHintKeyStyle.Render("<:>") + " " + keyHintActionStyle.Render("Command"),
+			keyHintKeyStyle.Render("</>") + " " + keyHintActionStyle.Render("Search"),
+		}
+	case s3ObjectDetailsScreen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<d>") + " " + keyHintActionStyle.Render("Download"),
+			keyHintKeyStyle.Render("<p>") + " " + keyHintActionStyle.Render("Presigned URL"),
+			keyHintKeyStyle.Render("<esc>") + " " + keyHintActionStyle.Render("Back"),
+		}
+	case eksScreen:
+		keyHints = []string{
+			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Details"),
+			keyHintKeyStyle.Render("<k>") + " " + keyHintActionStyle.Render("Kubeconfig"),
+			keyHintKeyStyle.Render("<:>") + " " + keyHintActionStyle.Render("Command"),
+		}
+	}
+
+	// ASCII art logo (simplified version for lazyaws)
+	logo := `  _
+ | | __ _ ____ _   _
+ | |/ _  |_  /| | | |
+ | | (_| |/ / | |_| |
+ |_|__,_/___| ___,_|
+   __ ___      _____
+  / _  |-|-|/| / __|
+ | (_| | V  V ||__ |
+  __,_| |/|/| |___/`
+
+	// Layout: left side, center spacing, key hints (2 columns), right side logo
+	leftContent := leftSide.String()
+
+	// Format key hints in columns
+	var rightSide strings.Builder
+	for i := 0; i < len(keyHints); i += 2 {
+		if i < len(keyHints) {
+			rightSide.WriteString(keyHints[i])
+			if i+1 < len(keyHints) {
+				rightSide.WriteString("  " + keyHints[i+1])
+			}
+			rightSide.WriteString("\n")
+		}
+	}
+
+	// Combine left and right with proper spacing
+	leftLines := strings.Split(leftContent, "\n")
+	rightLines := strings.Split(rightSide.String(), "\n")
+	logoLines := strings.Split(logo, "\n")
+
+	maxLines := len(leftLines)
+	if len(rightLines) > maxLines {
+		maxLines = len(rightLines)
+	}
+	if len(logoLines) > maxLines {
+		maxLines = len(logoLines)
+	}
+
+	var header strings.Builder
+	for i := 0; i < maxLines; i++ {
+		// Left side (fixed width ~30 chars)
+		left := ""
+		if i < len(leftLines) {
+			left = leftLines[i]
+		}
+		header.WriteString(left)
+
+		// Padding to align
+		leftWidth := lipgloss.Width(left)
+		padding := 30 - leftWidth
+		if padding > 0 {
+			header.WriteString(strings.Repeat(" ", padding))
+		}
+
+		// Right side key hints (middle section)
+		right := ""
+		if i < len(rightLines) {
+			right = rightLines[i]
+		}
+		header.WriteString(right)
+
+		// Logo on far right
+		if i < len(logoLines) {
+			rightWidth := lipgloss.Width(right)
+			logoPadding := 90 - rightWidth
+			if logoPadding > 0 {
+				header.WriteString(strings.Repeat(" ", logoPadding))
+			}
+			header.WriteString(labelStyle.Render(logoLines[i]))
+		}
+
+		header.WriteString("\n")
+	}
+
+	return header.String()
+}
+
+// renderK9sBreadcrumb creates a k9s-style breadcrumb navigation at the bottom
+func (m model) renderK9sBreadcrumb() string {
+	breadcrumbStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color("220")).
+		Bold(true).
+		Padding(0, 1)
+
+	var breadcrumbs []string
+
+	switch m.currentScreen {
+	case ec2Screen:
+		breadcrumbs = []string{"<ec2>", "<instances>"}
+	case ec2DetailsScreen:
+		breadcrumbs = []string{"<ec2>", "<instances>", "<details>"}
+	case s3Screen:
+		breadcrumbs = []string{"<s3>", "<buckets>"}
+	case s3BrowseScreen:
+		if m.s3CurrentBucket != "" {
+			breadcrumbs = []string{"<s3>", "<" + m.s3CurrentBucket + ">"}
+			if m.s3CurrentPrefix != "" {
+				breadcrumbs = append(breadcrumbs, "<"+m.s3CurrentPrefix+">")
+			}
+		}
+	case s3ObjectDetailsScreen:
+		breadcrumbs = []string{"<s3>", "<object>", "<details>"}
+	case eksScreen:
+		breadcrumbs = []string{"<eks>", "<clusters>"}
+	}
+
+	var result strings.Builder
+	for i, bc := range breadcrumbs {
+		if i > 0 {
+			result.WriteString(" ")
+		}
+		result.WriteString(breadcrumbStyle.Render(bc))
+	}
+
+	return result.String()
 }
 
 func (m model) renderEC2() string {
@@ -1756,14 +1923,23 @@ func (m model) renderEC2() string {
 	m.ensureVisible(m.ec2SelectedIndex, len(filteredInstances))
 	start, end := m.getVisibleRange(len(filteredInstances))
 
-	// Build table header
+	// Build table header (k9s style)
 	var content strings.Builder
-	content.WriteString(title + "\n\n")
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	searchInfo := ""
+	if m.vimState.LastSearch != "" {
+		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
+	}
+	content.WriteString(strings.Repeat("─", 120) + " ")
+	content.WriteString(titleStyle.Render(fmt.Sprintf("EC2-Instances%s[%d]", searchInfo, len(filteredInstances))))
+	content.WriteString(" " + strings.Repeat("─", 120) + "\n")
+
+	// Table header - k9s uses uppercase and symbols
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
 	content.WriteString(headerStyle.Render(fmt.Sprintf("%-3s %-20s %-30s %-15s %-15s %-15s\n",
-		"", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
-	content.WriteString(strings.Repeat("─", 103) + "\n")
+		"✓", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
@@ -1799,10 +1975,11 @@ func (m model) renderEC2() string {
 		)
 
 		if i == m.ec2SelectedIndex {
-			// Highlight the selected row
+			// Highlight the selected row - k9s style with cyan background
 			selectedStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color("240")).
-				Foreground(lipgloss.Color("15"))
+				Background(lipgloss.Color("51")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
 			row = selectedStyle.Render(row)
 		}
 
@@ -2106,14 +2283,23 @@ func (m model) renderS3() string {
 	m.ensureVisible(m.s3SelectedIndex, len(buckets))
 	start, end := m.getVisibleRange(len(buckets))
 
-	// Build table header
+	// Build table header (k9s style)
 	var content strings.Builder
-	content.WriteString(title + "\n\n")
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	searchInfo := ""
+	if m.vimState.LastSearch != "" {
+		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
+	}
+	content.WriteString(strings.Repeat("─", 120) + " ")
+	content.WriteString(titleStyle.Render(fmt.Sprintf("S3-Buckets%s[%d]", searchInfo, len(buckets))))
+	content.WriteString(" " + strings.Repeat("─", 120) + "\n")
+
+	// Table header
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
 	content.WriteString(headerStyle.Render(fmt.Sprintf("%-40s %-25s %-20s\n",
 		"BUCKET NAME", "CREATION DATE", "REGION")))
-	content.WriteString(strings.Repeat("─", 90) + "\n")
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
@@ -2136,10 +2322,11 @@ func (m model) renderS3() string {
 		)
 
 		if i == m.s3SelectedIndex {
-			// Highlight the selected row
+			// Highlight the selected row - k9s style with cyan background
 			selectedStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color("240")).
-				Foreground(lipgloss.Color("15"))
+				Background(lipgloss.Color("51")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
 			row = selectedStyle.Render(row)
 		}
 
@@ -2205,14 +2392,30 @@ func (m model) renderS3Browse() string {
 	m.ensureVisible(m.s3ObjectSelectedIndex, len(objects))
 	start, end := m.getVisibleRange(len(objects))
 
-	// Build table header
+	// Build table header (k9s style)
 	var content strings.Builder
-	content.WriteString(title + "\n\n")
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	searchInfo := ""
+	if m.vimState.LastSearch != "" {
+		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
+	}
+
+	// Breadcrumb for location
+	bucketPath := m.s3CurrentBucket
+	if m.s3CurrentPrefix != "" {
+		bucketPath += "/" + strings.TrimSuffix(m.s3CurrentPrefix, "/")
+	}
+
+	content.WriteString(strings.Repeat("─", 120) + " ")
+	content.WriteString(titleStyle.Render(fmt.Sprintf("S3-Objects(%s)%s[%d]", bucketPath, searchInfo, len(objects))))
+	content.WriteString(" " + strings.Repeat("─", 120) + "\n")
+
+	// Table header
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
 	content.WriteString(headerStyle.Render(fmt.Sprintf("%-6s %-50s %-15s %-25s %-20s\n",
 		"TYPE", "NAME", "SIZE", "LAST MODIFIED", "STORAGE CLASS")))
-	content.WriteString(strings.Repeat("─", 120) + "\n")
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
@@ -2259,10 +2462,11 @@ func (m model) renderS3Browse() string {
 		)
 
 		if i == m.s3ObjectSelectedIndex {
-			// Highlight the selected row
+			// Highlight the selected row - k9s style with cyan background
 			selectedStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color("240")).
-				Foreground(lipgloss.Color("15"))
+				Background(lipgloss.Color("51")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
 			row = selectedStyle.Render(row)
 		}
 

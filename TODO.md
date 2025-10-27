@@ -121,6 +121,7 @@
 - [ ] Command history
 - [x] Vim keybinding modes (complete with search, navigation, commands)
 - [x] VIM service navigation via commands (`:ec2`, `:s3`, `:eks` with tab completion)
+- [x] K9s-style interface (header with context info, key hints, breadcrumb navigation, cyan highlights)
 - [ ] Mouse support (optional)
 
 ### Additional AWS Services (Future)
