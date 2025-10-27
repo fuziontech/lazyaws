@@ -1534,11 +1534,18 @@ func (m model) View() string {
 	// K9s-style header: left sidebar with context info, center/right with key hints
 	s += m.renderK9sHeader() + "\n"
 
-	// Content area
+	// Content area - make it fill the terminal height
+	// Calculate height: terminal height - header (9 lines) - breadcrumb (1 line) - borders/padding (~4)
+	contentHeight := m.height - 14
+	if contentHeight < 10 {
+		contentHeight = 10
+	}
+
 	contentStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
-		Padding(1, 2)
+		Padding(1, 2).
+		Height(contentHeight)
 
 	var content string
 	switch m.currentScreen {
@@ -1938,13 +1945,12 @@ func (m model) renderEC2() string {
 
 	// Table header - k9s uses uppercase and symbols
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
-	content.WriteString(headerStyle.Render(fmt.Sprintf("%-3s %-20s %-30s %-15s %-15s %-15s\n",
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-1s  %-20s %-30s %-15s %-15s %-15s\n",
 		"✓", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
 
 	// Build table rows (only visible items)
 	for i := start; i < end; i++ {
 		inst := filteredInstances[i]
-		stateStyle := getStateStyle(inst.State)
 		name := inst.Name
 		if name == "" {
 			name = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("-")
@@ -1959,20 +1965,24 @@ func (m model) renderEC2() string {
 		}
 
 		// Check if instance is selected for bulk action
-		checkmark := " "
+		checkmarkStr := " "
 		if m.ec2SelectedInstances[inst.ID] {
-			checkmark = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("✓")
+			checkmarkStr = "✓"
 		}
 
-		// Highlight selected row
-		row := fmt.Sprintf("%-3s %-20s %-30s %-15s %-15s %-15s",
-			checkmark,
+		// Build row with proper spacing (format first, then apply colors to specific fields)
+		// Don't use styled strings in sprintf as ANSI codes break alignment
+		row := fmt.Sprintf("%-1s  %-20s %-30s %-15s %-15s %-15s",
+			checkmarkStr,
 			inst.ID,
 			truncate(name, 30),
-			stateStyle.Render(inst.State),
+			inst.State,
 			inst.InstanceType,
 			ip,
 		)
+
+		// Apply state color to the state field within the row
+		// (we'll handle this differently to maintain alignment)
 
 		if i == m.ec2SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
