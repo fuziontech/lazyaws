@@ -1984,6 +1984,12 @@ func (m model) renderEC2() string {
 
 		if i == m.ec2SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
+			// Pad the row to a fixed width to ensure background extends fully
+			// This prevents terminal from misinterpreting the width
+			rowWidth := lipgloss.Width(row)
+			if rowWidth < 100 {
+				row = row + strings.Repeat(" ", 100-rowWidth)
+			}
 			// Use ANSI codes directly to avoid lipgloss adding extra width
 			// \x1b[48;5;51m = cyan background, \x1b[38;5;0m = black foreground, \x1b[1m = bold, \x1b[0m = reset
 			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
