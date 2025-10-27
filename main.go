@@ -1996,10 +1996,14 @@ func (m model) renderEC2() string {
 
 		if i == m.ec2SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
+			// Ensure row is padded to exactly 98 characters (the column widths sum)
+			// This prevents any terminal interpretation issues
+			for len(row) < 98 {
+				row += " "
+			}
 			// Use ANSI codes directly to avoid lipgloss adding extra width
-			// \x1b[48;5;51m = cyan background, \x1b[38;5;0m = black foreground, \x1b[1m = bold
-			// \x1b[K = clear to end of line, \x1b[0m = reset all formatting
-			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[K\x1b[0m"
+			// \x1b[48;5;51m = cyan background, \x1b[38;5;0m = black foreground, \x1b[1m = bold, \x1b[0m = reset
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
