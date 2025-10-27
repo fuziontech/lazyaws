@@ -2642,9 +2642,20 @@ func (m model) renderS3() string {
 	if m.vimState.LastSearch != "" {
 		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
 	}
-	content.WriteString(strings.Repeat("─", 120) + " ")
-	content.WriteString(titleStyle.Render(fmt.Sprintf("S3-Buckets%s[%d]", searchInfo, len(buckets))))
-	content.WriteString(" " + strings.Repeat("─", 120) + "\n")
+	tableTitle := fmt.Sprintf("S3-Buckets%s[%d]", searchInfo, len(buckets))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	titleWidth := len(tableTitle)
+	totalWidth := 100
+	dashesWidth := (totalWidth - titleWidth - 2) / 2
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
 
 	// Table header
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
@@ -2756,9 +2767,20 @@ func (m model) renderS3Browse() string {
 		bucketPath += "/" + strings.TrimSuffix(m.s3CurrentPrefix, "/")
 	}
 
-	content.WriteString(strings.Repeat("─", 120) + " ")
-	content.WriteString(titleStyle.Render(fmt.Sprintf("S3-Objects(%s)%s[%d]", bucketPath, searchInfo, len(objects))))
-	content.WriteString(" " + strings.Repeat("─", 120) + "\n")
+	tableTitle := fmt.Sprintf("S3-Objects(%s)%s[%d]", bucketPath, searchInfo, len(objects))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	titleWidth := len(tableTitle)
+	totalWidth := 100
+	dashesWidth := (totalWidth - titleWidth - 2) / 2
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
 
 	// Table header
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
