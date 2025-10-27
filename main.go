@@ -1937,9 +1937,21 @@ func (m model) renderEC2() string {
 	if m.vimState.LastSearch != "" {
 		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
 	}
-	content.WriteString(strings.Repeat("─", 120) + " ")
-	content.WriteString(titleStyle.Render(fmt.Sprintf("EC2-Instances%s[%d]", searchInfo, len(filteredInstances))))
-	content.WriteString(" " + strings.Repeat("─", 120) + "\n")
+	tableTitle := fmt.Sprintf("EC2-Instances%s[%d]", searchInfo, len(filteredInstances))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	// Use actual string width not ANSI-coded width
+	titleWidth := len(tableTitle)                    // Visual width without ANSI codes
+	totalWidth := 100                                // Reasonable fixed width for the table
+	dashesWidth := (totalWidth - titleWidth - 2) / 2 // -2 for spaces around title
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
 
 	// Table header - k9s uses uppercase and symbols
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
@@ -1984,15 +1996,10 @@ func (m model) renderEC2() string {
 
 		if i == m.ec2SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
-			// Pad the row to a fixed width to ensure background extends fully
-			// This prevents terminal from misinterpreting the width
-			rowWidth := lipgloss.Width(row)
-			if rowWidth < 100 {
-				row = row + strings.Repeat(" ", 100-rowWidth)
-			}
 			// Use ANSI codes directly to avoid lipgloss adding extra width
-			// \x1b[48;5;51m = cyan background, \x1b[38;5;0m = black foreground, \x1b[1m = bold, \x1b[0m = reset
-			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
+			// \x1b[48;5;51m = cyan background, \x1b[38;5;0m = black foreground, \x1b[1m = bold
+			// \x1b[K = clear to end of line, \x1b[0m = reset all formatting
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[K\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
@@ -2336,7 +2343,8 @@ func (m model) renderS3() string {
 		if i == m.s3SelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
 			// Use ANSI codes directly to avoid lipgloss adding extra width
-			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
+			// \x1b[K clears to end of line with background color
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[K\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
@@ -2473,7 +2481,8 @@ func (m model) renderS3Browse() string {
 		if i == m.s3ObjectSelectedIndex {
 			// Highlight the selected row - k9s style with cyan background
 			// Use ANSI codes directly to avoid lipgloss adding extra width
-			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[0m"
+			// \x1b[K clears to end of line with background color
+			row = "\x1b[48;5;51m\x1b[38;5;0m\x1b[1m" + row + "\x1b[K\x1b[0m"
 		}
 
 		content.WriteString(row + "\n")
