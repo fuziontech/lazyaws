@@ -880,11 +880,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ec2InstanceDetails = nil
 				return m, nil
 			} else if m.currentScreen == s3BrowseScreen {
-				m.currentScreen = s3Screen
-				m.s3Objects = nil
-				m.s3CurrentBucket = ""
-				m.s3CurrentPrefix = ""
-				return m, nil
+				// If we're in a subfolder, go to parent folder
+				// Otherwise go back to bucket list
+				if m.s3CurrentPrefix != "" {
+					// Calculate parent prefix
+					// Remove trailing slash if present
+					prefix := strings.TrimSuffix(m.s3CurrentPrefix, "/")
+					// Find last slash to get parent
+					lastSlash := strings.LastIndex(prefix, "/")
+					if lastSlash >= 0 {
+						// Go to parent folder
+						m.s3CurrentPrefix = prefix[:lastSlash+1]
+					} else {
+						// We're at root level, go to root
+						m.s3CurrentPrefix = ""
+					}
+					m.loading = true
+					m.viewportOffset = 0
+					return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+				} else {
+					// We're at bucket root, go back to bucket list
+					m.currentScreen = s3Screen
+					m.s3Objects = nil
+					m.s3CurrentBucket = ""
+					m.s3CurrentPrefix = ""
+					return m, nil
+				}
 			} else if m.currentScreen == s3ObjectDetailsScreen {
 				m.currentScreen = s3BrowseScreen
 				m.s3ObjectDetails = nil
@@ -950,6 +971,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selectedBucket := buckets[m.s3SelectedIndex]
 					m.s3CurrentBucket = selectedBucket.Name
 					m.s3CurrentPrefix = ""
+					// Clear search when entering a bucket
+					m.vimState.LastSearch = ""
+					m.vimState.SearchResults = []int{}
+					m.s3FilteredBuckets = nil
 					m.loading = true
 					m.viewportOffset = 0
 					return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
@@ -965,6 +990,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if selectedObject.IsFolder {
 						// Navigate into folder
 						m.s3CurrentPrefix = selectedObject.Key
+						// Clear search when entering a folder
+						m.vimState.LastSearch = ""
+						m.vimState.SearchResults = []int{}
+						m.s3FilteredObjects = nil
 						m.loading = true
 						m.viewportOffset = 0
 						return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
