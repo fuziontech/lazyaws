@@ -4,18 +4,22 @@ import (
 	"context"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/fuziontech/lazyaws/internal/config"
 )
 
 // Client wraps AWS service clients
 type Client struct {
-	EC2    *ec2.Client
-	S3     *s3.Client
-	EKS    *eks.Client
-	Region string
+	EC2        *ec2.Client
+	S3         *s3.Client
+	EKS        *eks.Client
+	SSM        *ssm.Client
+	CloudWatch *cloudwatch.Client
+	Region     string
 }
 
 // NewClient creates a new AWS client with the default configuration
@@ -26,10 +30,12 @@ func NewClient(ctx context.Context, appConfig *config.Config) (*Client, error) {
 	}
 
 	return &Client{
-		EC2:    ec2.NewFromConfig(cfg),
-		S3:     s3.NewFromConfig(cfg),
-		EKS:    eks.NewFromConfig(cfg),
-		Region: cfg.Region,
+		EC2:        ec2.NewFromConfig(cfg),
+		S3:         s3.NewFromConfig(cfg),
+		EKS:        eks.NewFromConfig(cfg),
+		SSM:        ssm.NewFromConfig(cfg),
+		CloudWatch: cloudwatch.NewFromConfig(cfg),
+		Region:     cfg.Region,
 	}, nil
 }
 
@@ -43,10 +49,12 @@ func NewClientWithProfile(ctx context.Context, profile string) (*Client, error) 
 	}
 
 	return &Client{
-		EC2:    ec2.NewFromConfig(cfg),
-		S3:     s3.NewFromConfig(cfg),
-		EKS:    eks.NewFromConfig(cfg),
-		Region: cfg.Region,
+		EC2:        ec2.NewFromConfig(cfg),
+		S3:         s3.NewFromConfig(cfg),
+		EKS:        eks.NewFromConfig(cfg),
+		SSM:        ssm.NewFromConfig(cfg),
+		CloudWatch: cloudwatch.NewFromConfig(cfg),
+		Region:     cfg.Region,
 	}, nil
 }
 
