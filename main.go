@@ -32,6 +32,7 @@ type model struct {
 	height                  int
 	awsClient               *aws.Client
 	ec2Instances            []aws.Instance
+	ec2FilteredInstances    []aws.Instance // VIM-filtered view
 	ec2SelectedIndex        int
 	ec2SelectedInstances    map[string]bool // Multi-select support
 	ec2InstanceDetails      *aws.InstanceDetails
@@ -39,10 +40,12 @@ type model struct {
 	ec2InstanceMetrics      *aws.InstanceMetrics
 	ec2SSMStatus            *aws.SSMConnectionStatus
 	s3Buckets               []aws.Bucket
+	s3FilteredBuckets       []aws.Bucket // VIM-filtered view
 	s3SelectedIndex         int
 	s3CurrentBucket         string
 	s3CurrentPrefix         string
 	s3Objects               []aws.S3Object
+	s3FilteredObjects       []aws.S3Object // VIM-filtered view
 	s3ObjectSelectedIndex   int
 	s3NextContinuationToken *string
 	s3IsTruncated           bool
@@ -661,13 +664,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc":
-			// ESC key to dismiss S3 info popup or go back from details view
+			// ESC key to dismiss S3 info popup or clear search or go back from details view
 			if m.s3ShowingInfo {
 				m.s3ShowingInfo = false
 				m.s3InfoType = ""
 				m.s3BucketPolicy = ""
 				m.s3BucketVersioning = ""
 				m.s3PresignedURL = ""
+				return m, nil
+			}
+			// Clear active search filter
+			if m.vimState.LastSearch != "" {
+				m.vimState.LastSearch = ""
+				m.vimState.SearchResults = []int{}
+				m.ec2FilteredInstances = nil
+				m.s3FilteredBuckets = nil
+				m.s3FilteredObjects = nil
+				m.statusMessage = "Search cleared"
 				return m, nil
 			}
 			if m.currentScreen == ec2DetailsScreen {
@@ -731,28 +744,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter", "i":
 			// Enter key to view instance details or browse S3 bucket, or view object details
-			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
-				selectedInstance := m.ec2Instances[m.ec2SelectedIndex]
-				m.loading = true
-				return m, m.loadEC2InstanceDetails(selectedInstance.ID)
-			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
-				// Browse bucket contents
-				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
-				m.s3CurrentBucket = selectedBucket.Name
-				m.s3CurrentPrefix = ""
-				m.loading = true
-				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
-			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
-				if selectedObject.IsFolder {
-					// Navigate into folder
-					m.s3CurrentPrefix = selectedObject.Key
+			if m.currentScreen == ec2Screen {
+				// Use filtered list if active
+				instances := m.ec2Instances
+				if len(m.ec2FilteredInstances) > 0 {
+					instances = m.ec2FilteredInstances
+				}
+				if len(instances) > 0 && m.ec2SelectedIndex < len(instances) {
+					selectedInstance := instances[m.ec2SelectedIndex]
+					m.loading = true
+					return m, m.loadEC2InstanceDetails(selectedInstance.ID)
+				}
+			} else if m.currentScreen == s3Screen {
+				// Browse bucket contents - use filtered list if active
+				buckets := m.s3Buckets
+				if len(m.s3FilteredBuckets) > 0 {
+					buckets = m.s3FilteredBuckets
+				}
+				if len(buckets) > 0 && m.s3SelectedIndex < len(buckets) {
+					selectedBucket := buckets[m.s3SelectedIndex]
+					m.s3CurrentBucket = selectedBucket.Name
+					m.s3CurrentPrefix = ""
 					m.loading = true
 					return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
-				} else {
-					// View file details
-					m.loading = true
-					return m, m.loadS3ObjectDetails(m.s3CurrentBucket, selectedObject.Key)
+				}
+			} else if m.currentScreen == s3BrowseScreen {
+				// Use filtered list if active
+				objects := m.s3Objects
+				if len(m.s3FilteredObjects) > 0 {
+					objects = m.s3FilteredObjects
+				}
+				if len(objects) > 0 && m.s3ObjectSelectedIndex < len(objects) {
+					selectedObject := objects[m.s3ObjectSelectedIndex]
+					if selectedObject.IsFolder {
+						// Navigate into folder
+						m.s3CurrentPrefix = selectedObject.Key
+						m.loading = true
+						return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+					} else {
+						// View file details
+						m.loading = true
+						return m, m.loadS3ObjectDetails(m.s3CurrentBucket, selectedObject.Key)
+					}
 				}
 			}
 		case "c":
@@ -816,18 +849,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "d":
 			// Download selected S3 object
-			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
-				if !selectedObject.IsFolder {
-					// Extract just the filename from the key
-					fileName := selectedObject.Key
-					if strings.Contains(fileName, "/") {
-						parts := strings.Split(fileName, "/")
-						fileName = parts[len(parts)-1]
+			if m.currentScreen == s3BrowseScreen {
+				// Use filtered list if active
+				objects := m.s3Objects
+				if len(m.s3FilteredObjects) > 0 {
+					objects = m.s3FilteredObjects
+				}
+				if len(objects) > 0 && m.s3ObjectSelectedIndex < len(objects) {
+					selectedObject := objects[m.s3ObjectSelectedIndex]
+					if !selectedObject.IsFolder {
+						// Extract just the filename from the key
+						fileName := selectedObject.Key
+						if strings.Contains(fileName, "/") {
+							parts := strings.Split(fileName, "/")
+							fileName = parts[len(parts)-1]
+						}
+						m.loading = true
+						m.statusMessage = fmt.Sprintf("Downloading %s...", fileName)
+						return m, m.downloadS3Object(m.s3CurrentBucket, selectedObject.Key, fileName)
 					}
-					m.loading = true
-					m.statusMessage = fmt.Sprintf("Downloading %s...", fileName)
-					return m, m.downloadS3Object(m.s3CurrentBucket, selectedObject.Key, fileName)
 				}
 			} else if m.currentScreen == s3ObjectDetailsScreen && m.s3ObjectDetails != nil {
 				// Download from object details view
@@ -849,46 +889,81 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "D":
 			// Delete S3 object or bucket
-			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
-				if !selectedObject.IsFolder {
+			if m.currentScreen == s3BrowseScreen {
+				// Use filtered list if active
+				objects := m.s3Objects
+				if len(m.s3FilteredObjects) > 0 {
+					objects = m.s3FilteredObjects
+				}
+				if len(objects) > 0 && m.s3ObjectSelectedIndex < len(objects) {
+					selectedObject := objects[m.s3ObjectSelectedIndex]
+					if !selectedObject.IsFolder {
+						m.s3ConfirmDelete = true
+						m.s3DeleteTarget = "object"
+						m.s3DeleteKey = selectedObject.Key
+						m.statusMessage = fmt.Sprintf("Delete %s? (y/n)", selectedObject.Key)
+						return m, nil
+					}
+				}
+			} else if m.currentScreen == s3Screen {
+				// Use filtered list if active
+				buckets := m.s3Buckets
+				if len(m.s3FilteredBuckets) > 0 {
+					buckets = m.s3FilteredBuckets
+				}
+				if len(buckets) > 0 && m.s3SelectedIndex < len(buckets) {
+					selectedBucket := buckets[m.s3SelectedIndex]
 					m.s3ConfirmDelete = true
-					m.s3DeleteTarget = "object"
-					m.s3DeleteKey = selectedObject.Key
-					m.statusMessage = fmt.Sprintf("Delete %s? (y/n)", selectedObject.Key)
+					m.s3DeleteTarget = "bucket"
+					m.s3DeleteKey = selectedBucket.Name
+					m.statusMessage = fmt.Sprintf("Delete bucket %s? Bucket must be empty! (y/n)", selectedBucket.Name)
 					return m, nil
 				}
-			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
-				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
-				m.s3ConfirmDelete = true
-				m.s3DeleteTarget = "bucket"
-				m.s3DeleteKey = selectedBucket.Name
-				m.statusMessage = fmt.Sprintf("Delete bucket %s? Bucket must be empty! (y/n)", selectedBucket.Name)
-				return m, nil
 			}
 		case "p":
 			// Generate presigned URL or view bucket policy
-			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				selectedObject := m.s3Objects[m.s3ObjectSelectedIndex]
-				if !selectedObject.IsFolder {
-					m.loading = true
-					// Generate presigned URL with 1 hour expiration
-					return m, m.generatePresignedURL(m.s3CurrentBucket, selectedObject.Key, 3600)
+			if m.currentScreen == s3BrowseScreen {
+				// Use filtered list if active
+				objects := m.s3Objects
+				if len(m.s3FilteredObjects) > 0 {
+					objects = m.s3FilteredObjects
 				}
-			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
-				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
-				m.loading = true
-				return m, m.loadBucketPolicy(selectedBucket.Name)
+				if len(objects) > 0 && m.s3ObjectSelectedIndex < len(objects) {
+					selectedObject := objects[m.s3ObjectSelectedIndex]
+					if !selectedObject.IsFolder {
+						m.loading = true
+						// Generate presigned URL with 1 hour expiration
+						return m, m.generatePresignedURL(m.s3CurrentBucket, selectedObject.Key, 3600)
+					}
+				}
+			} else if m.currentScreen == s3Screen {
+				// Use filtered list if active
+				buckets := m.s3Buckets
+				if len(m.s3FilteredBuckets) > 0 {
+					buckets = m.s3FilteredBuckets
+				}
+				if len(buckets) > 0 && m.s3SelectedIndex < len(buckets) {
+					selectedBucket := buckets[m.s3SelectedIndex]
+					m.loading = true
+					return m, m.loadBucketPolicy(selectedBucket.Name)
+				}
 			} else if m.currentScreen == s3ObjectDetailsScreen && m.s3ObjectDetails != nil {
 				m.loading = true
 				return m, m.generatePresignedURL(m.s3CurrentBucket, m.s3ObjectDetails.Key, 3600)
 			}
 		case "v":
 			// View bucket versioning
-			if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
-				selectedBucket := m.s3Buckets[m.s3SelectedIndex]
-				m.loading = true
-				return m, m.loadBucketVersioning(selectedBucket.Name)
+			if m.currentScreen == s3Screen {
+				// Use filtered list if active
+				buckets := m.s3Buckets
+				if len(m.s3FilteredBuckets) > 0 {
+					buckets = m.s3FilteredBuckets
+				}
+				if len(buckets) > 0 && m.s3SelectedIndex < len(buckets) {
+					selectedBucket := buckets[m.s3SelectedIndex]
+					m.loading = true
+					return m, m.loadBucketVersioning(selectedBucket.Name)
+				}
 			}
 		case "f":
 			// Only filter on EC2 list screen
@@ -899,14 +974,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case " ":
 			// Toggle instance selection (space bar)
-			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
-				instanceID := m.ec2Instances[m.ec2SelectedIndex].ID
-				if m.ec2SelectedInstances[instanceID] {
-					delete(m.ec2SelectedInstances, instanceID)
-				} else {
-					m.ec2SelectedInstances[instanceID] = true
+			if m.currentScreen == ec2Screen {
+				// Use filtered list if active
+				instances := m.ec2Instances
+				if len(m.ec2FilteredInstances) > 0 {
+					instances = m.ec2FilteredInstances
 				}
-				return m, nil
+				if len(instances) > 0 && m.ec2SelectedIndex < len(instances) {
+					instanceID := instances[m.ec2SelectedIndex].ID
+					if m.ec2SelectedInstances[instanceID] {
+						delete(m.ec2SelectedInstances, instanceID)
+					} else {
+						m.ec2SelectedInstances[instanceID] = true
+					}
+					return m, nil
+				}
 			}
 		case "a":
 			// Toggle auto-refresh
@@ -1070,16 +1152,37 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 	var listLength int
 	var currentIndex int
 
-	// Determine current list and index
+	// Determine current list and index (use filtered list if active)
 	switch m.currentScreen {
 	case ec2Screen:
-		listLength = len(m.ec2Instances)
+		if len(m.ec2FilteredInstances) > 0 {
+			listLength = len(m.ec2FilteredInstances)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.ec2Instances)
+		}
 		currentIndex = m.ec2SelectedIndex
 	case s3Screen:
-		listLength = len(m.s3Buckets)
+		if len(m.s3FilteredBuckets) > 0 {
+			listLength = len(m.s3FilteredBuckets)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.s3Buckets)
+		}
 		currentIndex = m.s3SelectedIndex
 	case s3BrowseScreen:
-		listLength = len(m.s3Objects)
+		if len(m.s3FilteredObjects) > 0 {
+			listLength = len(m.s3FilteredObjects)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.s3Objects)
+		}
 		currentIndex = m.s3ObjectSelectedIndex
 	default:
 		return // No navigation for detail screens
@@ -1138,12 +1241,40 @@ func (m *model) applyVimSearch() {
 	// Perform search
 	m.vimState.SearchItems(searchItems)
 
-	// Jump to first result if available
+	// Filter the view to only show matching items
 	if len(m.vimState.SearchResults) > 0 {
-		m.setSelectedIndex(m.vimState.SearchResults[0])
-		m.statusMessage = fmt.Sprintf("Found %d matches", len(m.vimState.SearchResults))
+		switch m.currentScreen {
+		case ec2Screen:
+			m.ec2FilteredInstances = make([]aws.Instance, 0, len(m.vimState.SearchResults))
+			for _, idx := range m.vimState.SearchResults {
+				m.ec2FilteredInstances = append(m.ec2FilteredInstances, m.ec2Instances[idx])
+			}
+		case s3Screen:
+			m.s3FilteredBuckets = make([]aws.Bucket, 0, len(m.vimState.SearchResults))
+			for _, idx := range m.vimState.SearchResults {
+				m.s3FilteredBuckets = append(m.s3FilteredBuckets, m.s3Buckets[idx])
+			}
+		case s3BrowseScreen:
+			m.s3FilteredObjects = make([]aws.S3Object, 0, len(m.vimState.SearchResults))
+			for _, idx := range m.vimState.SearchResults {
+				m.s3FilteredObjects = append(m.s3FilteredObjects, m.s3Objects[idx])
+			}
+		}
+
+		// Reset selection to first filtered result
+		m.setSelectedIndex(0)
+		m.statusMessage = fmt.Sprintf("Showing %d matching results (ESC or :cf to clear)", len(m.vimState.SearchResults))
 	} else {
 		m.statusMessage = "No matches found"
+		// Clear filtered lists to show "no matches"
+		switch m.currentScreen {
+		case ec2Screen:
+			m.ec2FilteredInstances = []aws.Instance{}
+		case s3Screen:
+			m.s3FilteredBuckets = []aws.Bucket{}
+		case s3BrowseScreen:
+			m.s3FilteredObjects = []aws.S3Object{}
+		}
 	}
 }
 
@@ -1197,10 +1328,13 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 		}
 
 	case vim.CmdClearFilter, "clearfilter":
-		// Clear filter
+		// Clear filter and reset filtered lists
 		m.filter = ""
 		m.vimState.LastSearch = ""
 		m.vimState.SearchResults = []int{}
+		m.ec2FilteredInstances = nil
+		m.s3FilteredBuckets = nil
+		m.s3FilteredObjects = nil
 		m.statusMessage = "Filter cleared"
 
 	case vim.CmdHelp, "h", "?":
@@ -1395,6 +1529,9 @@ func (m model) renderEC2() string {
 	if m.filter != "" {
 		title += lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf(" (filtered by: %s)", m.filter))
 	}
+	if m.vimState.LastSearch != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(fmt.Sprintf(" [search: %s]", m.vimState.LastSearch))
+	}
 
 	if m.loading {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading instances...")
@@ -1405,9 +1542,14 @@ func (m model) renderEC2() string {
 		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
-	// Filter instances
+	// Use filtered instances if VIM search is active, otherwise use legacy filter or all instances
 	var filteredInstances []aws.Instance
-	if m.filter == "" {
+	if len(m.ec2FilteredInstances) > 0 {
+		filteredInstances = m.ec2FilteredInstances
+	} else if m.vimState.LastSearch != "" {
+		// Search is active but no results
+		filteredInstances = []aws.Instance{}
+	} else if m.filter == "" {
 		filteredInstances = m.ec2Instances
 	} else {
 		if strings.Contains(m.filter, "=") {
@@ -1747,6 +1889,9 @@ func (m model) renderEC2Details() string {
 
 func (m model) renderS3() string {
 	title := lipgloss.NewStyle().Bold(true).Render("S3 Buckets")
+	if m.vimState.LastSearch != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(fmt.Sprintf(" [search: %s]", m.vimState.LastSearch))
+	}
 
 	if m.loading {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading buckets...")
@@ -1757,7 +1902,19 @@ func (m model) renderS3() string {
 		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
-	if len(m.s3Buckets) == 0 {
+	// Use filtered buckets if VIM search is active
+	buckets := m.s3Buckets
+	if len(m.s3FilteredBuckets) > 0 {
+		buckets = m.s3FilteredBuckets
+	} else if m.vimState.LastSearch != "" {
+		// Search is active but no results
+		buckets = []aws.Bucket{}
+	}
+
+	if len(buckets) == 0 {
+		if m.vimState.LastSearch != "" {
+			return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No buckets match your search")
+		}
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No buckets found")
 	}
 
@@ -1771,7 +1928,7 @@ func (m model) renderS3() string {
 	content.WriteString(strings.Repeat("─", 90) + "\n")
 
 	// Build table rows
-	for i, bucket := range m.s3Buckets {
+	for i, bucket := range buckets {
 		creationDate := bucket.CreationDate
 		if creationDate == "" {
 			creationDate = "-"
@@ -1825,6 +1982,9 @@ func (m model) renderS3Browse() string {
 	}
 
 	title := breadcrumbStyle.Render("S3 Browser: ") + breadcrumbs.String()
+	if m.vimState.LastSearch != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(fmt.Sprintf(" [search: %s]", m.vimState.LastSearch))
+	}
 
 	if m.loading {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading objects...")
@@ -1835,7 +1995,19 @@ func (m model) renderS3Browse() string {
 		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
-	if len(m.s3Objects) == 0 {
+	// Use filtered objects if VIM search is active
+	objects := m.s3Objects
+	if len(m.s3FilteredObjects) > 0 {
+		objects = m.s3FilteredObjects
+	} else if m.vimState.LastSearch != "" {
+		// Search is active but no results
+		objects = []aws.S3Object{}
+	}
+
+	if len(objects) == 0 {
+		if m.vimState.LastSearch != "" {
+			return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No objects match your search")
+		}
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No objects found (empty folder)")
 	}
 
@@ -1849,7 +2021,7 @@ func (m model) renderS3Browse() string {
 	content.WriteString(strings.Repeat("─", 120) + "\n")
 
 	// Build table rows
-	for i, obj := range m.s3Objects {
+	for i, obj := range objects {
 		var typeIcon, name, size, lastModified, storageClass string
 
 		if obj.IsFolder {
