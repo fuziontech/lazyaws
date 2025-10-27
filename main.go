@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fuziontech/lazyaws/internal/aws"
 	"github.com/fuziontech/lazyaws/internal/config"
+	"github.com/fuziontech/lazyaws/internal/vim"
 )
 
 type screen int
@@ -26,49 +27,51 @@ const (
 )
 
 type model struct {
-	currentScreen       screen
-	width               int
-	height              int
-	awsClient           *aws.Client
-	ec2Instances        []aws.Instance
-	ec2SelectedIndex    int
-	ec2SelectedInstances map[string]bool // Multi-select support
-	ec2InstanceDetails  *aws.InstanceDetails
-	ec2InstanceStatus   *aws.InstanceStatus
-	ec2InstanceMetrics  *aws.InstanceMetrics
-	ec2SSMStatus        *aws.SSMConnectionStatus
-	s3Buckets                 []aws.Bucket
-	s3SelectedIndex           int
-	s3CurrentBucket           string
-	s3CurrentPrefix           string
-	s3Objects                 []aws.S3Object
-	s3ObjectSelectedIndex     int
-	s3NextContinuationToken   *string
-	s3IsTruncated             bool
-	s3ObjectDetails           *aws.S3ObjectDetails
-	s3Filter                  string
-	s3FilterActive            bool
-	s3PresignedURL            string
-	s3BucketPolicy            string
-	s3BucketVersioning        string
-	s3ShowingInfo             bool  // For showing bucket policy/versioning
-	s3InfoType                string // "policy" or "versioning"
-	s3ConfirmDelete           bool
-	s3DeleteTarget            string // "object" or "bucket"
-	s3DeleteKey               string
-	loading                   bool
-	err                 error
-	config              *config.Config
-	filterInput         textinput.Model
-	filtering           bool
-	filter              string
-	confirmAction       string
-	confirmInstanceID   string
-	showingConfirm      bool
-	statusMessage       string
-	autoRefresh         bool
-	autoRefreshInterval int // in seconds
-	copyToClipboard     string
+	currentScreen           screen
+	width                   int
+	height                  int
+	awsClient               *aws.Client
+	ec2Instances            []aws.Instance
+	ec2SelectedIndex        int
+	ec2SelectedInstances    map[string]bool // Multi-select support
+	ec2InstanceDetails      *aws.InstanceDetails
+	ec2InstanceStatus       *aws.InstanceStatus
+	ec2InstanceMetrics      *aws.InstanceMetrics
+	ec2SSMStatus            *aws.SSMConnectionStatus
+	s3Buckets               []aws.Bucket
+	s3SelectedIndex         int
+	s3CurrentBucket         string
+	s3CurrentPrefix         string
+	s3Objects               []aws.S3Object
+	s3ObjectSelectedIndex   int
+	s3NextContinuationToken *string
+	s3IsTruncated           bool
+	s3ObjectDetails         *aws.S3ObjectDetails
+	s3Filter                string
+	s3FilterActive          bool
+	s3PresignedURL          string
+	s3BucketPolicy          string
+	s3BucketVersioning      string
+	s3ShowingInfo           bool   // For showing bucket policy/versioning
+	s3InfoType              string // "policy" or "versioning"
+	s3ConfirmDelete         bool
+	s3DeleteTarget          string // "object" or "bucket"
+	s3DeleteKey             string
+	loading                 bool
+	err                     error
+	config                  *config.Config
+	filterInput             textinput.Model
+	filtering               bool
+	filter                  string
+	confirmAction           string
+	confirmInstanceID       string
+	showingConfirm          bool
+	statusMessage           string
+	autoRefresh             bool
+	autoRefreshInterval     int // in seconds
+	copyToClipboard         string
+	vimState                *vim.State
+	pageSize                int // For VIM page navigation
 }
 
 type instancesLoadedMsg struct {
@@ -123,8 +126,8 @@ type fileOperationCompletedMsg struct {
 
 type tickMsg struct{}
 
-type bulkActionCompletedMsg struct{
-	action string
+type bulkActionCompletedMsg struct {
+	action       string
 	successCount int
 	failureCount int
 }
@@ -165,6 +168,8 @@ func initialModel(cfg *config.Config) model {
 		ec2SelectedInstances: make(map[string]bool),
 		autoRefresh:          false,
 		autoRefreshInterval:  30, // Default 30 seconds
+		vimState:             vim.NewState(),
+		pageSize:             20, // Default page size for ctrl+d/ctrl+u
 	}
 }
 
@@ -424,7 +429,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle filtering
+	// Handle VIM modes (search/command)
+	if m.vimState.Mode == vim.SearchMode || m.vimState.Mode == vim.CommandMode {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			if m.vimState.HandleKey(msg) {
+				// If search mode was just completed, apply the search
+				if m.vimState.Mode == vim.NormalMode && m.vimState.LastSearch != "" {
+					m.applyVimSearch()
+				}
+				// If command mode was just completed, execute the command
+				if m.vimState.Mode == vim.NormalMode && m.vimState.CommandBuffer != "" {
+					cmd := m.executeVimCommand(m.vimState.CommandBuffer)
+					m.vimState.CommandBuffer = ""
+					return m, cmd
+				}
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	// Handle filtering (legacy filter mode)
 	if m.filtering {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
@@ -673,36 +699,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "3":
 			m.currentScreen = eksScreen
-		case "up", "k":
-			// Navigate up in lists
-			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
-				if m.ec2SelectedIndex > 0 {
-					m.ec2SelectedIndex--
+		case "k", "up", "j", "down", "g", "G", "ctrl+g", "ctrl+u", "ctrl+d", "ctrl+b", "ctrl+f", "pgup", "pgdown":
+			// VIM-style navigation
+			action := vim.ParseNavigation(msg)
+			m.handleVimNavigation(action)
+		case "/":
+			// Enter VIM search mode
+			m.vimState.EnterSearchMode()
+			return m, nil
+		case "n":
+			// Next search result (VIM-style)
+			if m.vimState.LastSearch != "" {
+				if idx := m.vimState.NextMatch(); idx >= 0 {
+					m.setSelectedIndex(idx)
 				}
-			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
-				if m.s3SelectedIndex > 0 {
-					m.s3SelectedIndex--
-				}
-			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				if m.s3ObjectSelectedIndex > 0 {
-					m.s3ObjectSelectedIndex--
+			} else if m.currentScreen == s3BrowseScreen && m.s3IsTruncated && m.s3NextContinuationToken != nil {
+				// Load next page in S3 browser (if no active search)
+				m.loading = true
+				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, m.s3NextContinuationToken)
+			}
+		case "N":
+			// Previous search result
+			if m.vimState.LastSearch != "" {
+				if idx := m.vimState.PrevMatch(); idx >= 0 {
+					m.setSelectedIndex(idx)
 				}
 			}
-		case "down", "j":
-			// Navigate down in lists
-			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
-				if m.ec2SelectedIndex < len(m.ec2Instances)-1 {
-					m.ec2SelectedIndex++
-				}
-			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
-				if m.s3SelectedIndex < len(m.s3Buckets)-1 {
-					m.s3SelectedIndex++
-				}
-			} else if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
-				if m.s3ObjectSelectedIndex < len(m.s3Objects)-1 {
-					m.s3ObjectSelectedIndex++
-				}
-			}
+		case ":":
+			// Enter VIM command mode
+			m.vimState.EnterCommandMode()
+			return m, nil
 		case "enter", "i":
 			// Enter key to view instance details or browse S3 bucket, or view object details
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
@@ -787,12 +813,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
 			}
-		case "n":
-			// Load next page in S3 browser
-			if m.currentScreen == s3BrowseScreen && m.s3IsTruncated && m.s3NextContinuationToken != nil {
-				m.loading = true
-				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, m.s3NextContinuationToken)
-			}
+
 		case "d":
 			// Download selected S3 object
 			if m.currentScreen == s3BrowseScreen && len(m.s3Objects) > 0 {
@@ -1044,6 +1065,155 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Helper functions for VIM navigation
+func (m *model) handleVimNavigation(action vim.NavigationAction) {
+	var listLength int
+	var currentIndex int
+
+	// Determine current list and index
+	switch m.currentScreen {
+	case ec2Screen:
+		listLength = len(m.ec2Instances)
+		currentIndex = m.ec2SelectedIndex
+	case s3Screen:
+		listLength = len(m.s3Buckets)
+		currentIndex = m.s3SelectedIndex
+	case s3BrowseScreen:
+		listLength = len(m.s3Objects)
+		currentIndex = m.s3ObjectSelectedIndex
+	default:
+		return // No navigation for detail screens
+	}
+
+	if listLength == 0 {
+		return
+	}
+
+	// Calculate new index
+	newIndex := vim.CalculateNewIndex(action, currentIndex, listLength, m.pageSize)
+
+	// Set the new index
+	m.setSelectedIndex(newIndex)
+}
+
+func (m *model) setSelectedIndex(index int) {
+	switch m.currentScreen {
+	case ec2Screen:
+		if index >= 0 && index < len(m.ec2Instances) {
+			m.ec2SelectedIndex = index
+		}
+	case s3Screen:
+		if index >= 0 && index < len(m.s3Buckets) {
+			m.s3SelectedIndex = index
+		}
+	case s3BrowseScreen:
+		if index >= 0 && index < len(m.s3Objects) {
+			m.s3ObjectSelectedIndex = index
+		}
+	}
+}
+
+func (m *model) applyVimSearch() {
+	// Build searchable strings for current view
+	var searchItems []string
+
+	switch m.currentScreen {
+	case ec2Screen:
+		for _, inst := range m.ec2Instances {
+			searchItems = append(searchItems,
+				strings.ToLower(inst.ID+" "+inst.Name+" "+inst.State+" "+inst.InstanceType+" "+inst.PublicIP+" "+inst.PrivateIP))
+		}
+	case s3Screen:
+		for _, bucket := range m.s3Buckets {
+			searchItems = append(searchItems, strings.ToLower(bucket.Name+" "+bucket.Region))
+		}
+	case s3BrowseScreen:
+		for _, obj := range m.s3Objects {
+			searchItems = append(searchItems, strings.ToLower(obj.Key))
+		}
+	default:
+		return
+	}
+
+	// Perform search
+	m.vimState.SearchItems(searchItems)
+
+	// Jump to first result if available
+	if len(m.vimState.SearchResults) > 0 {
+		m.setSelectedIndex(m.vimState.SearchResults[0])
+		m.statusMessage = fmt.Sprintf("Found %d matches", len(m.vimState.SearchResults))
+	} else {
+		m.statusMessage = "No matches found"
+	}
+}
+
+func (m *model) executeVimCommand(commandStr string) tea.Cmd {
+	cmd := vim.ParseCommand(commandStr)
+
+	switch cmd.Name {
+	case vim.CmdQuit, "quit":
+		// Quit current view or app
+		if m.currentScreen == ec2DetailsScreen {
+			m.currentScreen = ec2Screen
+			m.ec2InstanceDetails = nil
+		} else if m.currentScreen == s3BrowseScreen {
+			m.currentScreen = s3Screen
+			m.s3Objects = nil
+			m.s3CurrentBucket = ""
+			m.s3CurrentPrefix = ""
+		} else if m.currentScreen == s3ObjectDetailsScreen {
+			m.currentScreen = s3BrowseScreen
+			m.s3ObjectDetails = nil
+		} else {
+			return tea.Quit
+		}
+		return nil
+
+	case vim.CmdRefresh, "refresh":
+		// Refresh current view
+		m.loading = true
+		if m.currentScreen == ec2Screen {
+			return m.loadEC2Instances
+		} else if m.currentScreen == s3Screen {
+			return m.loadS3Buckets
+		} else if m.currentScreen == s3BrowseScreen {
+			return m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+		}
+
+	case vim.CmdSelectAll:
+		// Select all instances (EC2 only)
+		if m.currentScreen == ec2Screen {
+			for _, inst := range m.ec2Instances {
+				m.ec2SelectedInstances[inst.ID] = true
+			}
+			m.statusMessage = fmt.Sprintf("Selected all %d instances", len(m.ec2Instances))
+		}
+
+	case vim.CmdDeselectAll:
+		// Deselect all instances
+		if m.currentScreen == ec2Screen {
+			m.ec2SelectedInstances = make(map[string]bool)
+			m.statusMessage = "Cleared all selections"
+		}
+
+	case vim.CmdClearFilter, "clearfilter":
+		// Clear filter
+		m.filter = ""
+		m.vimState.LastSearch = ""
+		m.vimState.SearchResults = []int{}
+		m.statusMessage = "Filter cleared"
+
+	case vim.CmdHelp, "h", "?":
+		// Show help message
+		m.statusMessage = "VIM commands: :q (quit), :r (refresh), :sa (select all), :da (deselect all), :cf (clear filter)"
+
+	default:
+		m.statusMessage = fmt.Sprintf("Unknown command: %s", cmd.Name)
+	}
+
+	return nil
+}
+
 func (m model) View() string {
 	var s string
 
@@ -1112,6 +1282,21 @@ func (m model) View() string {
 
 	s += contentStyle.Render(content) + "\n"
 
+	// Show VIM mode indicator
+	if m.vimState.Mode == vim.SearchMode {
+		searchStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("3")).
+			Background(lipgloss.Color("0"))
+		s += "\n" + searchStyle.Render("/"+m.vimState.SearchQuery)
+	} else if m.vimState.Mode == vim.CommandMode {
+		commandStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("6")).
+			Background(lipgloss.Color("0"))
+		s += "\n" + commandStyle.Render(":"+m.vimState.CommandBuffer)
+	}
+
 	// Show confirmation dialog
 	if m.showingConfirm {
 		confirmStyle := lipgloss.NewStyle().
@@ -1174,26 +1359,33 @@ func (m model) View() string {
 	if m.currentScreen == ec2DetailsScreen {
 		// Show SSM connect option if SSM is connected
 		if m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
-			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | C:SSM Connect | ESC/q: Back"
+			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | C:SSM Connect | ESC/q/:q: Back"
 		} else {
-			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q: Back | 1/2/3: Switch Service"
+			helpText = "s:Start | S:Stop | R:Reboot | t:Terminate | ESC/q/:q: Back | 1/2/3: Switch Service"
 		}
 	} else if m.currentScreen == ec2Screen {
-		helpText = "↑↓/jk: Nav | Enter: Details | Space: Select | s:Start | S:Stop | R:Reboot | t:Term | a: Auto-refresh | x: Clear | y: Copy | f: Filter | q: Quit"
+		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | n/N:Next/Prev | Enter: Details | Space: Select | :Commands | q: Quit"
 	} else if m.currentScreen == s3Screen {
-		helpText = "↑↓/jk: Nav | Enter: Browse | D: Delete Bucket | p: Policy | v: Versioning | r: Refresh | q: Quit"
+		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | n/N:Next/Prev | Enter: Browse | D: Delete | p: Policy | v: Ver | :Commands | q: Quit"
 	} else if m.currentScreen == s3BrowseScreen {
 		nextPageHint := ""
 		if m.s3IsTruncated {
-			nextPageHint = " | n: Next Page"
+			nextPageHint = " | PgDn: Next"
 		}
-		helpText = "↑↓/jk: Nav | Enter: Details | d: Download | D: Delete | p: Presigned URL | h/Back: Up" + nextPageHint + " | ESC/q: Back"
+		helpText = "jk/↑↓: Nav | g/G: Top/Bot | ^d/^u: PgDn/Up | /:Search | Enter: Open | d: Download | D: Delete | h: Up" + nextPageHint + " | :Commands | q: Quit"
 	} else if m.currentScreen == s3ObjectDetailsScreen {
-		helpText = "d: Download | p: Presigned URL | ESC/q: Back"
+		helpText = "d: Download | p: Presigned URL | ESC/q/:q: Back"
 	} else {
-		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r: Refresh | q: Quit"
+		helpText = "Tab: Next | 1/2/3: Switch | c: Change Region | r/:r: Refresh | q/:q: Quit"
 	}
 	s += "\n" + helpStyle.Render(helpText)
+
+	// Add VIM commands help on second line
+	if m.currentScreen == ec2Screen || m.currentScreen == s3Screen || m.currentScreen == s3BrowseScreen {
+		vimHelpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+		vimHelp := "Commands: :q (quit) :r (refresh) :sa (select all) :da (deselect) :cf (clear filter) :help (show all)"
+		s += "\n" + vimHelpStyle.Render(vimHelp)
+	}
 
 	return s
 }

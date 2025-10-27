@@ -6,6 +6,7 @@ toolchain go1.24.7
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.31.15
+	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.20.0
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.51.4
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.257.2
 	github.com/aws/aws-sdk-go-v2/service/eks v1.74.3
@@ -22,7 +23,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.2 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.19 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.11 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.20.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.11 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.11 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.4 // indirect

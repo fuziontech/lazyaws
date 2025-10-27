@@ -119,7 +119,7 @@
 - [ ] Customizable keyboard shortcuts
 - [ ] Theme support (light/dark, custom colors)
 - [ ] Command history
-- [ ] Vim/Emacs keybinding modes
+- [x] Vim keybinding modes (complete with search, navigation, commands)
 - [ ] Mouse support (optional)
 
 ### Additional AWS Services (Future)
