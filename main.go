@@ -1774,8 +1774,8 @@ func (m model) View() string {
 
 	// Content area
 	// Set max height to prevent overflow and top clipping
-	// Leave room for header and footer elements
-	maxContentHeight := m.height - 6
+	// Leave room for header (5 lines) + border (2) + padding (2) + breadcrumb (1) + newlines (2) = 12 lines
+	maxContentHeight := m.height - 12
 	if maxContentHeight < 10 {
 		maxContentHeight = 10
 	}
