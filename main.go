@@ -33,6 +33,8 @@ type model struct {
 	ec2InstanceStatus   *aws.InstanceStatus
 	ec2InstanceMetrics  *aws.InstanceMetrics
 	ec2SSMStatus        *aws.SSMConnectionStatus
+	s3Buckets           []aws.Bucket
+	s3SelectedIndex     int
 	loading             bool
 	err                 error
 	config              *config.Config
@@ -75,6 +77,11 @@ type instanceActionCompletedMsg struct {
 	err    error
 }
 
+type bucketsLoadedMsg struct {
+	buckets []aws.Bucket
+	err     error
+}
+
 func initialModel(cfg *config.Config) model {
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
@@ -108,6 +115,12 @@ func (m model) loadEC2Instances() tea.Msg {
 	ctx := context.Background()
 	instances, err := m.awsClient.ListInstances(ctx)
 	return instancesLoadedMsg{instances: instances, err: err}
+}
+
+func (m model) loadS3Buckets() tea.Msg {
+	ctx := context.Background()
+	buckets, err := m.awsClient.ListBuckets(ctx)
+	return bucketsLoadedMsg{buckets: buckets, err: err}
 }
 
 func (m model) loadEC2InstanceDetails(instanceID string) tea.Cmd {
@@ -259,6 +272,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Refresh instances list
 		return m, m.loadEC2Instances
 
+	case bucketsLoadedMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.s3Buckets = msg.buckets
+			m.s3SelectedIndex = 0
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -278,22 +300,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "1":
 			m.currentScreen = ec2Screen
+			if len(m.ec2Instances) == 0 {
+				m.loading = true
+				return m, m.loadEC2Instances
+			}
 		case "2":
 			m.currentScreen = s3Screen
+			if len(m.s3Buckets) == 0 {
+				m.loading = true
+				return m, m.loadS3Buckets
+			}
 		case "3":
 			m.currentScreen = eksScreen
 		case "up", "k":
-			// Navigate up in EC2 instance list
+			// Navigate up in lists
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				if m.ec2SelectedIndex > 0 {
 					m.ec2SelectedIndex--
 				}
+			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
+				if m.s3SelectedIndex > 0 {
+					m.s3SelectedIndex--
+				}
 			}
 		case "down", "j":
-			// Navigate down in EC2 instance list
+			// Navigate down in lists
 			if m.currentScreen == ec2Screen && len(m.ec2Instances) > 0 {
 				if m.ec2SelectedIndex < len(m.ec2Instances)-1 {
 					m.ec2SelectedIndex++
+				}
+			} else if m.currentScreen == s3Screen && len(m.s3Buckets) > 0 {
+				if m.s3SelectedIndex < len(m.s3Buckets)-1 {
+					m.s3SelectedIndex++
 				}
 			}
 		case "enter":
@@ -334,6 +372,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentScreen == ec2Screen {
 				m.loading = true
 				return m, m.loadEC2Instances
+			} else if m.currentScreen == s3Screen {
+				m.loading = true
+				return m, m.loadS3Buckets
 			}
 		case "f":
 			// Only filter on EC2 list screen
@@ -666,6 +707,33 @@ func (m model) renderEC2Details() string {
 	}
 	content.WriteString("\n")
 
+	// Instance Type Specifications
+	if details.InstanceTypeInfo != nil {
+		typeInfo := details.InstanceTypeInfo
+		content.WriteString(sectionStyle.Render("Instance Type Specifications") + "\n")
+		if typeInfo.VCpus > 0 {
+			content.WriteString(labelStyle.Render("  vCPUs:           ") + valueStyle.Render(fmt.Sprintf("%d", typeInfo.VCpus)) + "\n")
+		}
+		if typeInfo.Memory > 0 {
+			memoryGB := float64(typeInfo.Memory) / 1024.0
+			content.WriteString(labelStyle.Render("  Memory:          ") + valueStyle.Render(fmt.Sprintf("%.2f GiB", memoryGB)) + "\n")
+		}
+		if typeInfo.NetworkPerformance != "" {
+			content.WriteString(labelStyle.Render("  Network:         ") + valueStyle.Render(typeInfo.NetworkPerformance) + "\n")
+		}
+		if typeInfo.StorageType != "" {
+			storageInfo := typeInfo.StorageType
+			if typeInfo.InstanceStorageGB > 0 {
+				storageInfo += fmt.Sprintf(" (%d GB)", typeInfo.InstanceStorageGB)
+			}
+			content.WriteString(labelStyle.Render("  Storage:         ") + valueStyle.Render(storageInfo) + "\n")
+		}
+		if typeInfo.EbsOptimized {
+			content.WriteString(labelStyle.Render("  EBS Optimized:   ") + valueStyle.Render("Yes") + "\n")
+		}
+		content.WriteString("\n")
+	}
+
 	// Network Information
 	content.WriteString(sectionStyle.Render("Network Information") + "\n")
 	content.WriteString(labelStyle.Render("  VPC ID:          ") + valueStyle.Render(details.VpcID) + "\n")
@@ -843,12 +911,65 @@ func (m model) renderEC2Details() string {
 }
 
 func (m model) renderS3() string {
-	return lipgloss.NewStyle().Bold(true).Render("S3 Buckets") + "\n\n" +
-		"Coming soon:\n" +
-		"  • List buckets\n" +
-		"  • Browse objects\n" +
-		"  • Upload/Download\n" +
-		"  • Bucket management"
+	title := lipgloss.NewStyle().Bold(true).Render("S3 Buckets")
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading buckets...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	if len(m.s3Buckets) == 0 {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No buckets found")
+	}
+
+	// Build table header
+	var content strings.Builder
+	content.WriteString(title + "\n\n")
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-40s %-25s %-20s\n",
+		"BUCKET NAME", "CREATION DATE", "REGION")))
+	content.WriteString(strings.Repeat("─", 90) + "\n")
+
+	// Build table rows
+	for i, bucket := range m.s3Buckets {
+		creationDate := bucket.CreationDate
+		if creationDate == "" {
+			creationDate = "-"
+		}
+
+		region := bucket.Region
+		if region == "" {
+			region = "-"
+		}
+
+		// Highlight selected row
+		row := fmt.Sprintf("%-40s %-25s %-20s",
+			truncate(bucket.Name, 40),
+			creationDate,
+			region,
+		)
+
+		if i == m.s3SelectedIndex {
+			// Highlight the selected row
+			selectedStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("240")).
+				Foreground(lipgloss.Color("15"))
+			row = selectedStyle.Render(row)
+		}
+
+		content.WriteString(row + "\n")
+	}
+
+	content.WriteString(fmt.Sprintf("\nTotal: %d buckets", len(m.s3Buckets)))
+	content.WriteString("\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
+		"Coming soon: Browse objects, Upload/Download, Bucket management"))
+
+	return content.String()
 }
 
 func (m model) renderEKS() string {

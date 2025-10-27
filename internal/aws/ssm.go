@@ -23,10 +23,11 @@ type SSMConnectionStatus struct {
 
 // CheckSSMConnectivity checks if an instance is reachable via SSM
 func (c *Client) CheckSSMConnectivity(ctx context.Context, instanceID string) (*SSMConnectionStatus, error) {
+	filterKey := "InstanceIds"
 	input := &ssm.DescribeInstanceInformationInput{
 		Filters: []types.InstanceInformationStringFilter{
 			{
-				Key:    getString(&[]string{"InstanceIds"}[0]),
+				Key:    &filterKey,
 				Values: []string{instanceID},
 			},
 		},

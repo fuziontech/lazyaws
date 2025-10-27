@@ -41,6 +41,19 @@ type InstanceDetails struct {
 	SecurityGroups   []SecurityGroup
 	BlockDevices     []BlockDevice
 	NetworkInterfaces []NetworkInterface
+	InstanceTypeInfo *InstanceTypeInfo
+}
+
+// InstanceTypeInfo contains specifications for an instance type
+type InstanceTypeInfo struct {
+	InstanceType         string
+	VCpus                int32
+	Memory               int64 // in MiB
+	NetworkPerformance   string
+	StorageType          string
+	EbsOptimized         bool
+	InstanceStorageGB    int64
+	SupportedArchitectures []string
 }
 
 // SecurityGroup represents a security group attached to an instance
@@ -241,6 +254,13 @@ func (c *Client) GetInstanceDetails(ctx context.Context, instanceID string) (*In
 		details.NetworkInterfaces = append(details.NetworkInterfaces, iface)
 	}
 
+	// Get Instance Type Information
+	typeInfo, err := c.GetInstanceTypeInfo(ctx, details.InstanceType)
+	if err == nil {
+		details.InstanceTypeInfo = typeInfo
+	}
+	// If error fetching type info, just continue without it
+
 	return details, nil
 }
 
@@ -370,4 +390,72 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*Ins
 	}
 
 	return instanceStatus, nil
+}
+
+// GetInstanceTypeInfo retrieves detailed specifications for an instance type
+func (c *Client) GetInstanceTypeInfo(ctx context.Context, instanceType string) (*InstanceTypeInfo, error) {
+	input := &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
+	}
+
+	result, err := c.EC2.DescribeInstanceTypes(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe instance type: %w", err)
+	}
+
+	if len(result.InstanceTypes) == 0 {
+		return nil, fmt.Errorf("instance type %s not found", instanceType)
+	}
+
+	typeInfo := result.InstanceTypes[0]
+
+	info := &InstanceTypeInfo{
+		InstanceType: string(typeInfo.InstanceType),
+	}
+
+	// VCPUs
+	if typeInfo.VCpuInfo != nil && typeInfo.VCpuInfo.DefaultVCpus != nil {
+		info.VCpus = *typeInfo.VCpuInfo.DefaultVCpus
+	}
+
+	// Memory
+	if typeInfo.MemoryInfo != nil && typeInfo.MemoryInfo.SizeInMiB != nil {
+		info.Memory = *typeInfo.MemoryInfo.SizeInMiB
+	}
+
+	// Network Performance
+	if typeInfo.NetworkInfo != nil {
+		if typeInfo.NetworkInfo.NetworkPerformance != nil {
+			info.NetworkPerformance = *typeInfo.NetworkInfo.NetworkPerformance
+		}
+		if typeInfo.NetworkInfo.EnaSupport != "" {
+			info.NetworkPerformance += " (ENA)"
+		}
+	}
+
+	// EBS Optimization
+	if typeInfo.EbsInfo != nil {
+		if typeInfo.EbsInfo.EbsOptimizedSupport != "" {
+			info.EbsOptimized = (string(typeInfo.EbsInfo.EbsOptimizedSupport) == "default" ||
+								 string(typeInfo.EbsInfo.EbsOptimizedSupport) == "supported")
+		}
+	}
+
+	// Instance Storage
+	if typeInfo.InstanceStorageInfo != nil {
+		if typeInfo.InstanceStorageInfo.TotalSizeInGB != nil {
+			info.InstanceStorageGB = *typeInfo.InstanceStorageInfo.TotalSizeInGB
+			info.StorageType = "Instance Store"
+		}
+	}
+	if info.InstanceStorageGB == 0 {
+		info.StorageType = "EBS Only"
+	}
+
+	// Supported Architectures
+	for _, arch := range typeInfo.ProcessorInfo.SupportedArchitectures {
+		info.SupportedArchitectures = append(info.SupportedArchitectures, string(arch))
+	}
+
+	return info, nil
 }
