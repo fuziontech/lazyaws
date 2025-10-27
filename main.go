@@ -2014,8 +2014,6 @@ func (m model) renderK9sHeader() string {
 		keyHints = []string{
 			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Browse"),
 			keyHintKeyStyle.Render("<D>") + " " + keyHintActionStyle.Render("Delete"),
-			keyHintKeyStyle.Render("<p>") + " " + keyHintActionStyle.Render("Policy"),
-			keyHintKeyStyle.Render("<v>") + " " + keyHintActionStyle.Render("Versioning"),
 			keyHintKeyStyle.Render("<:>") + " " + keyHintActionStyle.Render("Command"),
 			keyHintKeyStyle.Render("</>") + " " + keyHintActionStyle.Render("Search"),
 		}
