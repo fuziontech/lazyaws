@@ -3106,7 +3106,7 @@ func (m model) renderEKSDetails() string {
 		}
 	}
 
-	return content.String()
+	return m.renderWithViewport(content.String())
 }
 
 func getEKSStatusStyle(status string) lipgloss.Style {
