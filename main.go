@@ -1380,7 +1380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Helper functions for VIM navigation
 func (m *model) handleVimNavigation(action vim.NavigationAction) {
 	// For detail screens, handle viewport scrolling instead of item navigation
-	if m.currentScreen == ec2DetailsScreen || m.currentScreen == s3ObjectDetailsScreen {
+	if m.currentScreen == ec2DetailsScreen || m.currentScreen == s3ObjectDetailsScreen || m.currentScreen == eksDetailsScreen {
 		m.handleDetailViewScroll(action)
 		return
 	}
