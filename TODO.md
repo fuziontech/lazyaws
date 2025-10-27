@@ -48,6 +48,10 @@
 - [x] Instance type information and pricing
 - [x] Auto-refresh with configurable interval
 - [x] Copy instance ID/IP to clipboard
+- [ ] Fix SSM in-terminal Ctrl+C signal handling
+  - Currently Ctrl+C in SSM session terminates the entire session instead of just the running process
+  - Need to investigate proper terminal/signal handling for session-manager-plugin
+  - May require using pty (pseudo-terminal) or alternative approach
 
 ## Phase 2: S3 Management
 

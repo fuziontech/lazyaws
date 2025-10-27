@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -77,6 +78,8 @@ type model struct {
 	pageSize                int      // For VIM page navigation
 	viewportOffset          int      // Scroll offset for current view
 	commandSuggestions      []string // Command suggestions for tab completion
+	ssmInstanceID           string   // Store instance ID for SSM session launch
+	ssmRegion               string   // Store region for SSM session launch
 }
 
 type instancesLoadedMsg struct {
@@ -155,6 +158,11 @@ type bucketPolicyLoadedMsg struct {
 type bucketVersioningLoadedMsg struct {
 	versioning string
 	err        error
+}
+
+type launchSSMSessionMsg struct {
+	instanceID string
+	region     string
 }
 
 func initialModel(cfg *config.Config) model {
@@ -457,6 +465,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.commandSuggestions = vim.GetCommandSuggestions(m.vimState.CommandBuffer)
 				}
 
+				// Apply search on every keypress in search mode (instant search)
+				if m.vimState.Mode == vim.SearchMode {
+					if m.vimState.SearchQuery != "" {
+						// Update the search query and apply immediately
+						m.vimState.LastSearch = m.vimState.SearchQuery
+						m.applyVimSearch()
+					} else {
+						// Empty search query - clear the search
+						m.vimState.LastSearch = ""
+						m.vimState.SearchResults = []int{}
+						m.ec2FilteredInstances = nil
+						m.s3FilteredBuckets = nil
+						m.s3FilteredObjects = nil
+					}
+				}
+
 				// If search mode was just completed, apply the search
 				if m.vimState.Mode == vim.NormalMode && m.vimState.LastSearch != "" {
 					m.applyVimSearch()
@@ -663,6 +687,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.s3ShowingInfo = true
 		m.s3InfoType = "versioning"
 		return m, nil
+
+	case launchSSMSessionMsg:
+		// Store the SSM session info in the model so we can access it after quit
+		m.ssmInstanceID = msg.instanceID
+		m.ssmRegion = msg.region
+		m.statusMessage = fmt.Sprintf("Launching SSM session for %s...", msg.instanceID)
+		// Quit the program to launch SSM in current terminal
+		return m, tea.Quit
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -1145,13 +1177,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "C":
 			// Launch SSM session (only in details view with SSM connected)
 			if m.currentScreen == ec2DetailsScreen && m.ec2InstanceDetails != nil && m.ec2SSMStatus != nil && m.ec2SSMStatus.Connected {
-				err := m.awsClient.LaunchSSMSession(m.ec2InstanceDetails.ID, m.awsClient.GetRegion())
-				if err != nil {
-					m.statusMessage = fmt.Sprintf("Failed to launch SSM session: %v", err)
-				} else {
-					m.statusMessage = "Launching SSM session in new terminal..."
+				// Return a message that will trigger SSM session launch
+				return m, func() tea.Msg {
+					return launchSSMSessionMsg{
+						instanceID: m.ec2InstanceDetails.ID,
+						region:     m.awsClient.GetRegion(),
+					}
 				}
-				return m, nil
 			}
 		}
 
@@ -1496,8 +1528,10 @@ func (m *model) renderWithViewport(content string) string {
 	lines := strings.Split(content, "\n")
 
 	// Calculate available height for content
-	// Account for: header (3 lines), footer (3 lines), status (1 line), padding (4 lines)
-	availableHeight := m.height - 11
+	// Must match the calculations in ensureVisible and getVisibleRange
+	// Account for: k9s header (9 lines), content border/padding (4 lines),
+	//              breadcrumb (3 lines), vim command line (2 lines), scroll indicator (1 line)
+	availableHeight := m.height - 19
 	if availableHeight < 10 {
 		availableHeight = 10 // Minimum viewport
 	}
@@ -2652,9 +2686,50 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(initialModel(cfg), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v", err)
-		os.Exit(1)
+	// Main loop: run the TUI, and if SSM session is requested, run it and restart
+	for {
+		p := tea.NewProgram(initialModel(cfg), tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			fmt.Printf("Error: %v", err)
+			os.Exit(1)
+		}
+
+		// Check if we should launch an SSM session
+		m, ok := finalModel.(model)
+		if !ok || m.ssmInstanceID == "" {
+			// Normal exit, no SSM session to launch
+			break
+		}
+
+		// Launch SSM session in the current terminal
+		fmt.Printf("Connecting to instance %s via SSM...\n", m.ssmInstanceID)
+
+		// Create the SSM command
+		// Let the session-manager-plugin handle terminal mode itself
+		ssmCmd := exec.Command("aws", "ssm", "start-session", "--target", m.ssmInstanceID, "--region", m.ssmRegion)
+		ssmCmd.Stdin = os.Stdin
+		ssmCmd.Stdout = os.Stdout
+		ssmCmd.Stderr = os.Stderr
+
+		// Run the command - let it handle signals naturally
+		err = ssmCmd.Run()
+
+		if err != nil {
+			// Only show error if it's not a normal exit
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				// Exit code 130 means Ctrl+C was pressed - this is normal
+				if exitErr.ExitCode() != 130 {
+					fmt.Printf("\nSSM session ended with code %d\n", exitErr.ExitCode())
+				}
+			} else {
+				fmt.Printf("\nSSM session error: %v\n", err)
+				fmt.Println("Press Enter to return to lazyaws...")
+				fmt.Scanln()
+			}
+		}
+
+		fmt.Println("\nReturning to lazyaws...")
+		// Loop continues and restarts the TUI
 	}
 }
