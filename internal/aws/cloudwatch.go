@@ -34,13 +34,15 @@ func (c *Client) GetInstanceMetrics(ctx context.Context, instanceID string) (*In
 
 	// Helper function to get metric statistics
 	getMetric := func(metricName string, stat string) (float64, error) {
+		namespace := "AWS/EC2"
+		dimensionName := "InstanceId"
 		input := &cloudwatch.GetMetricStatisticsInput{
-			Namespace:  getString(&[]string{"AWS/EC2"}[0]),
-			MetricName: getString(&metricName),
+			Namespace:  &namespace,
+			MetricName: &metricName,
 			Dimensions: []types.Dimension{
 				{
-					Name:  getString(&[]string{"InstanceId"}[0]),
-					Value: getString(&instanceID),
+					Name:  &dimensionName,
+					Value: &instanceID,
 				},
 			},
 			StartTime:  &startTime,

@@ -45,15 +45,15 @@
 
 ### EC2 Enhancement
 - [ ] Bulk operations (multi-select)
-- [ ] Instance type information and pricing
+- [x] Instance type information and pricing
 - [ ] Auto-refresh with configurable interval
 - [ ] Copy instance ID/IP to clipboard
 
 ## Phase 2: S3 Management
 
 ### Core S3 Features
-- [ ] List S3 buckets
-  - [ ] Display bucket name, region, creation date
+- [x] List S3 buckets
+  - [x] Display bucket name, region, creation date
   - [ ] Show bucket size (if available)
 - [ ] Browse bucket contents
   - [ ] Navigate folder structure
