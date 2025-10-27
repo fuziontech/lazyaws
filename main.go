@@ -75,6 +75,7 @@ type model struct {
 	copyToClipboard         string
 	vimState                *vim.State
 	pageSize                int // For VIM page navigation
+	viewportOffset          int // Scroll offset for current view
 }
 
 type instancesLoadedMsg struct {
@@ -650,16 +651,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentScreen == ec2DetailsScreen {
 				m.currentScreen = ec2Screen
 				m.ec2InstanceDetails = nil
+				m.viewportOffset = 0
 				return m, nil
 			} else if m.currentScreen == s3BrowseScreen {
 				m.currentScreen = s3Screen
 				m.s3Objects = nil
 				m.s3CurrentBucket = ""
 				m.s3CurrentPrefix = ""
+				m.viewportOffset = 0
 				return m, nil
 			} else if m.currentScreen == s3ObjectDetailsScreen {
 				m.currentScreen = s3BrowseScreen
 				m.s3ObjectDetails = nil
+				m.viewportOffset = 0
 				return m, nil
 			}
 			return m, tea.Quit
@@ -700,18 +704,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "1":
 			m.currentScreen = ec2Screen
+			m.viewportOffset = 0
 			if len(m.ec2Instances) == 0 {
 				m.loading = true
 				return m, m.loadEC2Instances
 			}
 		case "2":
 			m.currentScreen = s3Screen
+			m.viewportOffset = 0
 			if len(m.s3Buckets) == 0 {
 				m.loading = true
 				return m, m.loadS3Buckets
 			}
 		case "3":
 			m.currentScreen = eksScreen
+			m.viewportOffset = 0
 		case "k", "up", "j", "down", "g", "G", "ctrl+g", "ctrl+u", "ctrl+d", "ctrl+b", "ctrl+f", "pgup", "pgdown":
 			// VIM-style navigation
 			action := vim.ParseNavigation(msg)
@@ -753,6 +760,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(instances) > 0 && m.ec2SelectedIndex < len(instances) {
 					selectedInstance := instances[m.ec2SelectedIndex]
 					m.loading = true
+					m.viewportOffset = 0
 					return m, m.loadEC2InstanceDetails(selectedInstance.ID)
 				}
 			} else if m.currentScreen == s3Screen {
@@ -766,6 +774,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.s3CurrentBucket = selectedBucket.Name
 					m.s3CurrentPrefix = ""
 					m.loading = true
+					m.viewportOffset = 0
 					return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
 				}
 			} else if m.currentScreen == s3BrowseScreen {
@@ -780,10 +789,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Navigate into folder
 						m.s3CurrentPrefix = selectedObject.Key
 						m.loading = true
+						m.viewportOffset = 0
 						return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
 					} else {
 						// View file details
 						m.loading = true
+						m.viewportOffset = 0
 						return m, m.loadS3ObjectDetails(m.s3CurrentBucket, selectedObject.Key)
 					}
 				}
@@ -834,6 +845,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.currentScreen = s3Screen
 					m.s3Objects = nil
 					m.s3CurrentBucket = ""
+					m.viewportOffset = 0
 					return m, nil
 				}
 				// Remove last directory from prefix
@@ -844,6 +856,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.s3CurrentPrefix = ""
 				}
 				m.loading = true
+				m.viewportOffset = 0
 				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
 			}
 
@@ -1197,6 +1210,9 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 
 	// Set the new index
 	m.setSelectedIndex(newIndex)
+
+	// Ensure the selected item is visible in the viewport
+	m.ensureVisible(newIndex, listLength)
 }
 
 func (m *model) setSelectedIndex(index int) {
@@ -1346,6 +1362,62 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 	}
 
 	return nil
+}
+
+// ensureVisible adjusts viewport offset to keep the selected item visible
+func (m *model) ensureVisible(selectedIndex, listLength int) {
+	if listLength == 0 {
+		m.viewportOffset = 0
+		return
+	}
+
+	// Calculate available height for the list
+	// Account for: header (3 lines), table header (2 lines), footer (3 lines), status (1 line), padding (4 lines)
+	availableHeight := m.height - 13
+	if availableHeight < 5 {
+		availableHeight = 5 // Minimum viewport size
+	}
+
+	// Ensure selected item is visible
+	if selectedIndex < m.viewportOffset {
+		// Selected item is above viewport, scroll up
+		m.viewportOffset = selectedIndex
+	} else if selectedIndex >= m.viewportOffset+availableHeight {
+		// Selected item is below viewport, scroll down
+		m.viewportOffset = selectedIndex - availableHeight + 1
+	}
+
+	// Clamp viewport offset
+	maxOffset := listLength - availableHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.viewportOffset > maxOffset {
+		m.viewportOffset = maxOffset
+	}
+	if m.viewportOffset < 0 {
+		m.viewportOffset = 0
+	}
+}
+
+// getVisibleRange returns the start and end indices for items to display
+func (m *model) getVisibleRange(listLength int) (int, int) {
+	if listLength == 0 {
+		return 0, 0
+	}
+
+	availableHeight := m.height - 13
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+
+	start := m.viewportOffset
+	end := m.viewportOffset + availableHeight
+	if end > listLength {
+		end = listLength
+	}
+
+	return start, end
 }
 
 func (m model) View() string {
@@ -1577,6 +1649,10 @@ func (m model) renderEC2() string {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No instances found")
 	}
 
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.ec2SelectedIndex, len(filteredInstances))
+	start, end := m.getVisibleRange(len(filteredInstances))
+
 	// Build table header
 	var content strings.Builder
 	content.WriteString(title + "\n\n")
@@ -1586,8 +1662,9 @@ func (m model) renderEC2() string {
 		"", "INSTANCE ID", "NAME", "STATE", "TYPE", "IP")))
 	content.WriteString(strings.Repeat("─", 103) + "\n")
 
-	// Build table rows
-	for i, inst := range filteredInstances {
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		inst := filteredInstances[i]
 		stateStyle := getStateStyle(inst.State)
 		name := inst.Name
 		if name == "" {
@@ -1630,7 +1707,11 @@ func (m model) renderEC2() string {
 	}
 
 	selectedCount := len(m.ec2SelectedInstances)
-	content.WriteString(fmt.Sprintf("\nTotal: %d instances", len(filteredInstances)))
+
+	// Show scroll position and total
+	scrollInfo := fmt.Sprintf("\nShowing %d-%d of %d instances", start+1, end, len(filteredInstances))
+	content.WriteString(scrollInfo)
+
 	if selectedCount > 0 {
 		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(fmt.Sprintf(" | Selected: %d", selectedCount)))
 	}
@@ -1918,6 +1999,10 @@ func (m model) renderS3() string {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No buckets found")
 	}
 
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.s3SelectedIndex, len(buckets))
+	start, end := m.getVisibleRange(len(buckets))
+
 	// Build table header
 	var content strings.Builder
 	content.WriteString(title + "\n\n")
@@ -1927,8 +2012,9 @@ func (m model) renderS3() string {
 		"BUCKET NAME", "CREATION DATE", "REGION")))
 	content.WriteString(strings.Repeat("─", 90) + "\n")
 
-	// Build table rows
-	for i, bucket := range buckets {
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		bucket := buckets[i]
 		creationDate := bucket.CreationDate
 		if creationDate == "" {
 			creationDate = "-"
@@ -1957,7 +2043,8 @@ func (m model) renderS3() string {
 		content.WriteString(row + "\n")
 	}
 
-	content.WriteString(fmt.Sprintf("\nTotal: %d buckets", len(m.s3Buckets)))
+	// Show scroll position and total
+	content.WriteString(fmt.Sprintf("\nShowing %d-%d of %d buckets", start+1, end, len(buckets)))
 
 	return content.String()
 }
@@ -2011,6 +2098,10 @@ func (m model) renderS3Browse() string {
 		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No objects found (empty folder)")
 	}
 
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.s3ObjectSelectedIndex, len(objects))
+	start, end := m.getVisibleRange(len(objects))
+
 	// Build table header
 	var content strings.Builder
 	content.WriteString(title + "\n\n")
@@ -2020,8 +2111,9 @@ func (m model) renderS3Browse() string {
 		"TYPE", "NAME", "SIZE", "LAST MODIFIED", "STORAGE CLASS")))
 	content.WriteString(strings.Repeat("─", 120) + "\n")
 
-	// Build table rows
-	for i, obj := range objects {
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		obj := objects[i]
 		var typeIcon, name, size, lastModified, storageClass string
 
 		if obj.IsFolder {
@@ -2074,8 +2166,8 @@ func (m model) renderS3Browse() string {
 		content.WriteString(row + "\n")
 	}
 
-	// Pagination info
-	content.WriteString(fmt.Sprintf("\nShowing: %d objects", len(m.s3Objects)))
+	// Pagination and scroll info
+	content.WriteString(fmt.Sprintf("\nShowing %d-%d of %d objects", start+1, end, len(objects)))
 	if m.s3IsTruncated {
 		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(" (more available - press 'n' for next page)"))
 	}
