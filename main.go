@@ -1361,6 +1361,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if len(accounts) > 0 && m.ssoSelectedIndex < len(accounts) {
 					selectedAccount := accounts[m.ssoSelectedIndex]
+					// Clear search when switching accounts
+					m.vimState.LastSearch = ""
+					m.vimState.SearchResults = []int{}
+					m.ssoFilteredAccounts = nil
 					m.loading = true
 					m.viewportOffset = 0
 					m.statusMessage = fmt.Sprintf("Switching to account: %s (%s)", selectedAccount.AccountName, selectedAccount.AccountID)
