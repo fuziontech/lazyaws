@@ -163,7 +163,7 @@
 - [ ] Cost tracking and estimates
 - [ ] CloudWatch dashboard integration
 - [ ] Terraform/CloudFormation integration
-- [ ] Multi-account/organization support
+- [x] Multi-account/organization support
 - [ ] Custom scripts/macros for common workflows
-- [ ] AWS SSO integration
+- [x] AWS SSO integration
 - [ ] MFA support

@@ -20,7 +20,8 @@ import (
 type screen int
 
 const (
-	ec2Screen screen = iota
+	accountScreen screen = iota
+	ec2Screen
 	ec2DetailsScreen
 	s3Screen
 	s3BrowseScreen
@@ -88,6 +89,12 @@ type model struct {
 	commandSuggestions      []string // Command suggestions for tab completion
 	ssmInstanceID           string   // Store instance ID for SSM session launch
 	ssmRegion               string   // Store region for SSM session launch
+	ssoAuthenticator        *aws.SSOAuthenticator
+	ssoAccounts             []aws.SSOAccount
+	ssoFilteredAccounts     []aws.SSOAccount
+	ssoSelectedIndex        int
+	currentAccountID        string
+	currentAccountName      string
 }
 
 type instancesLoadedMsg struct {
@@ -185,6 +192,23 @@ type eksClusterDetailsLoadedMsg struct {
 	err        error
 }
 
+type ssoAuthCompletedMsg struct {
+	authenticator *aws.SSOAuthenticator
+	err           error
+}
+
+type ssoAccountsLoadedMsg struct {
+	accounts []aws.SSOAccount
+	err      error
+}
+
+type accountSwitchedMsg struct {
+	client      *aws.Client
+	accountID   string
+	accountName string
+	err         error
+}
+
 type kubeconfigUpdatedMsg struct {
 	clusterName string
 	err         error
@@ -222,6 +246,54 @@ func (m model) initAWSClient() tea.Msg {
 		return instancesLoadedMsg{err: err}
 	}
 	return client
+}
+
+// SSO authentication and account switching functions
+func (m model) authenticateSSO(startURL, region string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		authenticator := aws.NewSSOAuthenticator(startURL, region)
+		err := authenticator.Authenticate(ctx)
+		return ssoAuthCompletedMsg{authenticator: authenticator, err: err}
+	}
+}
+
+func (m model) loadSSOAccounts() tea.Cmd {
+	return func() tea.Msg {
+		if m.ssoAuthenticator == nil {
+			return ssoAccountsLoadedMsg{err: fmt.Errorf("SSO not authenticated")}
+		}
+		ctx := context.Background()
+		accounts, err := m.ssoAuthenticator.ListAccounts(ctx)
+		return ssoAccountsLoadedMsg{accounts: accounts, err: err}
+	}
+}
+
+func (m model) switchToSSOAccount(account aws.SSOAccount, region string) tea.Cmd {
+	return func() tea.Msg {
+		if m.ssoAuthenticator == nil {
+			return accountSwitchedMsg{err: fmt.Errorf("SSO not authenticated")}
+		}
+		ctx := context.Background()
+
+		// Get credentials for the account/role
+		creds, err := m.ssoAuthenticator.GetCredentials(ctx, account.AccountID, account.RoleName)
+		if err != nil {
+			return accountSwitchedMsg{err: fmt.Errorf("failed to get credentials: %w", err)}
+		}
+
+		// Create new AWS client with SSO credentials
+		client, err := aws.NewClientWithSSOCredentials(ctx, creds, region, account.AccountName)
+		if err != nil {
+			return accountSwitchedMsg{err: fmt.Errorf("failed to create client: %w", err)}
+		}
+
+		return accountSwitchedMsg{
+			client:      client,
+			accountID:   account.AccountID,
+			accountName: account.AccountName,
+		}
+	}
 }
 
 func (m model) loadEC2Instances() tea.Msg {
@@ -745,6 +817,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ssoAuthCompletedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("SSO authentication failed: %v", msg.err)
+			m.err = msg.err
+			return m, nil
+		}
+		m.ssoAuthenticator = msg.authenticator
+		m.statusMessage = "SSO authentication successful - loading accounts..."
+		// Load available accounts
+		return m, m.loadSSOAccounts()
+
+	case ssoAccountsLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to load accounts: %v", msg.err)
+			m.err = msg.err
+			return m, nil
+		}
+		m.ssoAccounts = msg.accounts
+		m.ssoSelectedIndex = 0
+		m.currentScreen = accountScreen
+		m.statusMessage = fmt.Sprintf("Loaded %d accounts - select one to continue", len(msg.accounts))
+		return m, nil
+
+	case accountSwitchedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to switch account: %v", msg.err)
+			m.err = msg.err
+			return m, nil
+		}
+		// Update client and account info
+		m.awsClient = msg.client
+		m.currentAccountID = msg.accountID
+		m.currentAccountName = msg.accountName
+		// Switch to EC2 screen and load instances
+		m.currentScreen = ec2Screen
+		m.viewportOffset = 0
+		m.statusMessage = fmt.Sprintf("Switched to account: %s", msg.accountName)
+		return m, m.loadEC2Instances
+
 	case objectsLoadedMsg:
 		m.loading = false
 		m.err = msg.err
@@ -1033,6 +1147,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.loading = true
 					m.viewportOffset = 0
 					return m, m.loadEKSClusterDetails(selectedCluster.Name)
+				}
+			} else if m.currentScreen == accountScreen {
+				// Switch to selected AWS account
+				accounts := m.ssoAccounts
+				if len(m.ssoFilteredAccounts) > 0 {
+					accounts = m.ssoFilteredAccounts
+				}
+				if len(accounts) > 0 && m.ssoSelectedIndex < len(accounts) {
+					selectedAccount := accounts[m.ssoSelectedIndex]
+					m.loading = true
+					m.viewportOffset = 0
+					m.statusMessage = fmt.Sprintf("Switching to account: %s (%s)", selectedAccount.AccountName, selectedAccount.AccountID)
+					return m, m.switchToSSOAccount(selectedAccount, m.config.Region)
 				}
 			}
 		case "c":
@@ -1437,6 +1564,16 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 
 	// Determine current list and index (use filtered list if active)
 	switch m.currentScreen {
+	case accountScreen:
+		if len(m.ssoFilteredAccounts) > 0 {
+			listLength = len(m.ssoFilteredAccounts)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.ssoAccounts)
+		}
+		currentIndex = m.ssoSelectedIndex
 	case ec2Screen:
 		if len(m.ec2FilteredInstances) > 0 {
 			listLength = len(m.ec2FilteredInstances)
@@ -1467,6 +1604,16 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 			listLength = len(m.s3Objects)
 		}
 		currentIndex = m.s3ObjectSelectedIndex
+	case eksScreen:
+		if len(m.eksFilteredClusters) > 0 {
+			listLength = len(m.eksFilteredClusters)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.eksClusters)
+		}
+		currentIndex = m.eksSelectedIndex
 	default:
 		return // No navigation for other screens
 	}
@@ -1520,6 +1667,10 @@ func (m *model) handleDetailViewScroll(action vim.NavigationAction) {
 
 func (m *model) setSelectedIndex(index int) {
 	switch m.currentScreen {
+	case accountScreen:
+		if index >= 0 && index < len(m.ssoAccounts) {
+			m.ssoSelectedIndex = index
+		}
 	case ec2Screen:
 		if index >= 0 && index < len(m.ec2Instances) {
 			m.ec2SelectedIndex = index
@@ -1544,6 +1695,11 @@ func (m *model) applyVimSearch() {
 	var searchItems []string
 
 	switch m.currentScreen {
+	case accountScreen:
+		for _, acc := range m.ssoAccounts {
+			searchItems = append(searchItems,
+				strings.ToLower(acc.AccountID+" "+acc.AccountName+" "+acc.RoleName+" "+acc.EmailAddress))
+		}
 	case ec2Screen:
 		for _, inst := range m.ec2Instances {
 			searchItems = append(searchItems,
@@ -1571,6 +1727,11 @@ func (m *model) applyVimSearch() {
 	// Filter the view to only show matching items
 	if len(m.vimState.SearchResults) > 0 {
 		switch m.currentScreen {
+		case accountScreen:
+			m.ssoFilteredAccounts = make([]aws.SSOAccount, 0, len(m.vimState.SearchResults))
+			for _, idx := range m.vimState.SearchResults {
+				m.ssoFilteredAccounts = append(m.ssoFilteredAccounts, m.ssoAccounts[idx])
+			}
 		case ec2Screen:
 			m.ec2FilteredInstances = make([]aws.Instance, 0, len(m.vimState.SearchResults))
 			for _, idx := range m.vimState.SearchResults {
@@ -1600,6 +1761,8 @@ func (m *model) applyVimSearch() {
 		m.statusMessage = "No matches found"
 		// Clear filtered lists to show "no matches"
 		switch m.currentScreen {
+		case accountScreen:
+			m.ssoFilteredAccounts = []aws.SSOAccount{}
 		case ec2Screen:
 			m.ec2FilteredInstances = []aws.Instance{}
 		case s3Screen:
@@ -1704,6 +1867,24 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 			return m.loadEKSClusters
 		}
 		m.statusMessage = "Switched to EKS"
+
+	case vim.CmdAccount, "acc":
+		// Switch to account selection screen
+		if m.ssoAuthenticator == nil {
+			// Start SSO authentication flow
+			m.loading = true
+			m.statusMessage = "Starting SSO authentication - opening browser..."
+			// TODO: Make these configurable
+			return m.authenticateSSO("", "") // Use defaults from sso.go
+		}
+		// Show account selection screen
+		m.currentScreen = accountScreen
+		m.viewportOffset = 0
+		if len(m.ssoAccounts) == 0 {
+			m.loading = true
+			return m.loadSSOAccounts()
+		}
+		m.statusMessage = "Account selection"
 
 	default:
 		m.statusMessage = fmt.Sprintf("Unknown command: %s", cmd.Name)
@@ -1836,6 +2017,8 @@ func (m model) View() string {
 
 	var content string
 	switch m.currentScreen {
+	case accountScreen:
+		content = m.renderAccountSelection()
 	case ec2Screen:
 		content = m.renderEC2()
 	case ec2DetailsScreen:
@@ -1952,6 +2135,9 @@ func (m model) renderK9sHeader() string {
 	// Service name (like "Context" in k9s)
 	var serviceName, viewName string
 	switch m.currentScreen {
+	case accountScreen:
+		serviceName = "AWS"
+		viewName = "Account Selection"
 	case ec2Screen:
 		serviceName = "EC2"
 		viewName = "Instances"
@@ -1980,6 +2166,17 @@ func (m model) renderK9sHeader() string {
 
 	if m.awsClient != nil {
 		leftSide.WriteString(labelStyle.Render("Region:  ") + valueStyle.Render(m.awsClient.GetRegion()) + "\n")
+
+		// Display account information if available
+		if m.currentAccountName != "" {
+			leftSide.WriteString(labelStyle.Render("Account: ") + valueStyle.Render(m.currentAccountName))
+			if m.currentAccountID != "" {
+				leftSide.WriteString(valueStyle.Render(fmt.Sprintf(" (%s)", m.currentAccountID)))
+			}
+			leftSide.WriteString("\n")
+		} else if m.awsClient.GetAccountID() != "" {
+			leftSide.WriteString(labelStyle.Render("Account: ") + valueStyle.Render(m.awsClient.GetAccountID()) + "\n")
+		}
 	}
 
 	// Add version info (like K9s Rev)
@@ -2196,6 +2393,108 @@ func (m model) renderK9sBreadcrumb() string {
 	}
 
 	return result.String()
+}
+
+func (m model) renderAccountSelection() string {
+	title := lipgloss.NewStyle().Bold(true).Render("AWS Account Selection")
+	if m.vimState.LastSearch != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(fmt.Sprintf(" [search: %s]", m.vimState.LastSearch))
+	}
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading accounts...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	// Use filtered accounts if VIM search is active, otherwise use all accounts
+	accounts := m.ssoAccounts
+	if len(m.ssoFilteredAccounts) > 0 {
+		accounts = m.ssoFilteredAccounts
+	} else if m.vimState.LastSearch != "" {
+		// Search is active but no results
+		accounts = []aws.SSOAccount{}
+	}
+
+	if len(accounts) == 0 {
+		if m.vimState.LastSearch != "" {
+			return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No accounts match your search")
+		}
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No accounts found")
+	}
+
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.ssoSelectedIndex, len(accounts))
+	start, end := m.getVisibleRange(len(accounts))
+
+	// Build table header (k9s style)
+	var content strings.Builder
+
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	searchInfo := ""
+	if m.vimState.LastSearch != "" {
+		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
+	}
+	tableTitle := fmt.Sprintf("AWS-Accounts%s[%d]", searchInfo, len(accounts))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	titleWidth := len(tableTitle)
+	totalWidth := 120
+	dashesWidth := (totalWidth - titleWidth - 2) / 2
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
+
+	// Table header - k9s uses uppercase and symbols
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-30s %-20s %-35s %-30s",
+		"ACCOUNT NAME", "ACCOUNT ID", "ROLE", "EMAIL")) + "\n")
+
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		account := accounts[i]
+
+		// Build row with proper spacing
+		row := fmt.Sprintf("%-30s %-20s %-35s %-30s",
+			truncate(account.AccountName, 30),
+			account.AccountID,
+			truncate(account.RoleName, 35),
+			truncate(account.EmailAddress, 30),
+		)
+
+		if i == m.ssoSelectedIndex {
+			// Highlight the selected row - k9s style with cyan background
+			for len(row) < 118 {
+				row += " "
+			}
+			selectedStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("51")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
+			content.WriteString(selectedStyle.Render(row) + "\n")
+		} else {
+			// Normal row
+			normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+			content.WriteString(normalStyle.Render(row) + "\n")
+		}
+	}
+
+	// Add scroll indicators
+	if start > 0 || end < len(accounts) {
+		scrollInfo := fmt.Sprintf("\n[Showing %d-%d of %d | Use j/k or ↓/↑ to navigate]", start+1, end, len(accounts))
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(scrollInfo))
+	}
+
+	return content.String()
 }
 
 func (m model) renderEC2() string {
