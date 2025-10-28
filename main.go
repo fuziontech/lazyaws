@@ -1362,9 +1362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(accounts) > 0 && m.ssoSelectedIndex < len(accounts) {
 					selectedAccount := accounts[m.ssoSelectedIndex]
 					// Clear search when switching accounts
-					m.vimState.LastSearch = ""
-					m.vimState.SearchResults = []int{}
-					m.ssoFilteredAccounts = nil
+					m.clearSearch()
 					m.loading = true
 					m.viewportOffset = 0
 					m.statusMessage = fmt.Sprintf("Switching to account: %s (%s)", selectedAccount.AccountName, selectedAccount.AccountID)
@@ -1390,6 +1388,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "tab":
 			// Tab cycles through main screens (not details)
+			m.clearSearch() // Clear search when switching screens
 			if m.currentScreen == ec2Screen {
 				m.currentScreen = s3Screen
 			} else if m.currentScreen == s3Screen {
@@ -1760,6 +1759,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Helper function to clear all search state
+func (m *model) clearSearch() {
+	m.vimState.LastSearch = ""
+	m.vimState.SearchResults = []int{}
+	m.ec2FilteredInstances = nil
+	m.s3FilteredBuckets = nil
+	m.s3FilteredObjects = nil
+	m.ssoFilteredAccounts = nil
+	m.eksFilteredClusters = nil
+}
+
 // Helper functions for VIM navigation
 func (m *model) handleVimNavigation(action vim.NavigationAction) {
 	// For detail screens, handle viewport scrolling instead of item navigation
@@ -2056,6 +2066,7 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 
 	case vim.CmdEC2:
 		// Switch to EC2 service
+		m.clearSearch() // Clear search when switching screens
 		m.currentScreen = ec2Screen
 		m.viewportOffset = 0
 		if len(m.ec2Instances) == 0 {
@@ -2066,6 +2077,7 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 
 	case vim.CmdS3:
 		// Switch to S3 service
+		m.clearSearch() // Clear search when switching screens
 		m.currentScreen = s3Screen
 		m.viewportOffset = 0
 		if len(m.s3Buckets) == 0 {
@@ -2076,6 +2088,7 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 
 	case vim.CmdEKS:
 		// Switch to EKS service
+		m.clearSearch() // Clear search when switching screens
 		m.currentScreen = eksScreen
 		m.viewportOffset = 0
 		if len(m.eksClusters) == 0 {
