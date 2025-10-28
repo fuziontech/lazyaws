@@ -2146,6 +2146,32 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 		}
 		m.statusMessage = "Account selection"
 
+	case vim.CmdRegion:
+		// Cycle to next region
+		if m.config == nil || len(m.config.Regions) == 0 {
+			m.statusMessage = "No regions configured"
+			return nil
+		}
+		// Find current region index
+		currentIndex := -1
+		for i, r := range m.config.Regions {
+			if r == m.config.Region {
+				currentIndex = i
+				break
+			}
+		}
+		// Cycle to next region
+		if currentIndex != -1 {
+			nextIndex := (currentIndex + 1) % len(m.config.Regions)
+			m.config.Region = m.config.Regions[nextIndex]
+			m.loading = true
+			m.statusMessage = fmt.Sprintf("Switching to region: %s", m.config.Region)
+			return m.initAWSClient
+		} else {
+			m.statusMessage = "Current region not found in config"
+			return nil
+		}
+
 	default:
 		m.statusMessage = fmt.Sprintf("Unknown command: %s", cmd.Name)
 	}

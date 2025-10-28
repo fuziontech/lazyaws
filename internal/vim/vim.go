@@ -299,6 +299,7 @@ const (
 	CmdS3            = "s3"
 	CmdEKS           = "eks"
 	CmdAccount       = "account"
+	CmdRegion        = "region"
 )
 
 // AllCommands returns a list of all available commands for completion
@@ -312,6 +313,7 @@ func AllCommands() []string {
 		"da", "deselectall",
 		"ec2", "s3", "eks",
 		"account", "acc",
+		"region",
 	}
 }
 
