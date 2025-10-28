@@ -2219,8 +2219,14 @@ func (m model) View() string {
 
 	// Content area
 	// Set max height to prevent overflow and top clipping
-	// Leave room for header (5 lines) + border (2) + padding (2) + breadcrumb (1) + newlines (2) = 12 lines
-	maxContentHeight := m.height - 12
+	// For auth screens (simpler header), use less restrictive height
+	// For main screens (full header with hints), use more restrictive height
+	// Leave room for header + border (2) + padding (2) + breadcrumb (1) + newlines (2)
+	maxContentHeight := m.height - 10 // Default: ~8 lines overhead
+	if m.currentScreen >= ec2Screen {
+		// Main screens have larger headers with key hints
+		maxContentHeight = m.height - 12 // ~12 lines overhead
+	}
 	if maxContentHeight < 10 {
 		maxContentHeight = 10
 	}
