@@ -25,21 +25,21 @@ const (
 
 // SSOSession represents an active SSO session with cached tokens
 type SSOSession struct {
-	StartURL      string    `json:"start_url"`
-	Region        string    `json:"region"`
-	AccessToken   string    `json:"access_token"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	ClientID      string    `json:"client_id"`
-	ClientSecret  string    `json:"client_secret"`
+	StartURL              string    `json:"start_url"`
+	Region                string    `json:"region"`
+	AccessToken           string    `json:"access_token"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	ClientID              string    `json:"client_id"`
+	ClientSecret          string    `json:"client_secret"`
 	RegistrationExpiresAt time.Time `json:"registration_expires_at"`
 }
 
 // SSOAccount represents an AWS account available through SSO
 type SSOAccount struct {
-	AccountID   string
-	AccountName string
+	AccountID    string
+	AccountName  string
 	EmailAddress string
-	RoleName    string
+	RoleName     string
 }
 
 // SSOAuthenticator handles AWS SSO authentication
@@ -251,7 +251,7 @@ func (a *SSOAuthenticator) registerClient(ctx context.Context, oidcClient *ssooi
 
 	a.session.ClientID = *registerResp.ClientId
 	a.session.ClientSecret = *registerResp.ClientSecret
-	a.session.RegistrationExpiresAt = time.Now().Add(time.Duration(registerResp.ClientSecretExpiresAt) * time.Second)
+	a.session.RegistrationExpiresAt = time.Unix(registerResp.ClientSecretExpiresAt, 0)
 
 	return nil
 }
@@ -338,7 +338,7 @@ func isAuthPending(err error) bool {
 	}
 	errMsg := err.Error()
 	return strings.Contains(errMsg, "AuthorizationPendingException") ||
-	       strings.Contains(errMsg, "authorization_pending")
+		strings.Contains(errMsg, "authorization_pending")
 }
 
 // hashString creates a simple hash of a string for cache filenames

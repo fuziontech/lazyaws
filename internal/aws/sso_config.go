@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // AuthMethod represents the authentication method
@@ -167,7 +168,7 @@ func ValidateSSOStartURL(url string) error {
 	}
 
 	// Basic validation - should start with https://
-	if len(url) < 8 || url[:8] != "https://" {
+	if !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("SSO start URL must start with https://")
 	}
 

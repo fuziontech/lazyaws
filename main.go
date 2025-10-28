@@ -33,6 +33,14 @@ const (
 	eksDetailsScreen
 )
 
+// Auth method indices
+const (
+	authMethodEnvVars = 0
+	authMethodProfile = 1
+	authMethodSSO     = 2
+	maxAuthMethod     = authMethodSSO
+)
+
 type model struct {
 	currentScreen           screen
 	width                   int
@@ -654,7 +662,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedAuthMethod--
 				}
 			case "down", "j":
-				if m.selectedAuthMethod < 2 {
+				if m.selectedAuthMethod < maxAuthMethod {
 					m.selectedAuthMethod++
 				}
 			case "enter":
@@ -1894,8 +1902,15 @@ func (m *model) applyVimSearch() {
 	switch m.currentScreen {
 	case accountScreen:
 		for _, acc := range m.ssoAccounts {
-			searchItems = append(searchItems,
-				strings.ToLower(acc.AccountID+" "+acc.AccountName+" "+acc.RoleName+" "+acc.EmailAddress))
+			var sb strings.Builder
+			sb.WriteString(acc.AccountID)
+			sb.WriteString(" ")
+			sb.WriteString(acc.AccountName)
+			sb.WriteString(" ")
+			sb.WriteString(acc.RoleName)
+			sb.WriteString(" ")
+			sb.WriteString(acc.EmailAddress)
+			searchItems = append(searchItems, strings.ToLower(sb.String()))
 		}
 	case ec2Screen:
 		for _, inst := range m.ec2Instances {
