@@ -2228,10 +2228,11 @@ func (m model) View() string {
 	// Auth screens should show full content
 	if m.currentScreen >= ec2Screen {
 		// Set max height to prevent overflow and top clipping
-		// Leave room for header + border (2) + padding (2) + breadcrumb (1) + newlines (2)
-		maxContentHeight := m.height - 12
-		if maxContentHeight < 10 {
-			maxContentHeight = 10
+		// Leave room for header (~7 lines) + border (2) + padding (2) + breadcrumb (1) + status (1) = ~13 total
+		// But be less aggressive - use height - 8 to give more content space
+		maxContentHeight := m.height - 8
+		if maxContentHeight < 15 {
+			maxContentHeight = 15
 		}
 		contentStyle = contentStyle.MaxHeight(maxContentHeight)
 	}
