@@ -298,6 +298,7 @@ const (
 	CmdEC2           = "ec2"
 	CmdS3            = "s3"
 	CmdEKS           = "eks"
+	CmdAccount       = "account"
 )
 
 // AllCommands returns a list of all available commands for completion
@@ -310,6 +311,7 @@ func AllCommands() []string {
 		"sa", "selectall",
 		"da", "deselectall",
 		"ec2", "s3", "eks",
+		"account", "acc",
 	}
 }
 

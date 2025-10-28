@@ -20,13 +20,25 @@ import (
 type screen int
 
 const (
-	ec2Screen screen = iota
+	authMethodScreen screen = iota
+	authProfileScreen
+	ssoConfigScreen
+	accountScreen
+	ec2Screen
 	ec2DetailsScreen
 	s3Screen
 	s3BrowseScreen
 	s3ObjectDetailsScreen
 	eksScreen
 	eksDetailsScreen
+)
+
+// Auth method indices
+const (
+	authMethodEnvVars = 0
+	authMethodProfile = 1
+	authMethodSSO     = 2
+	maxAuthMethod     = authMethodSSO
 )
 
 type model struct {
@@ -73,7 +85,12 @@ type model struct {
 	err                     error
 	config                  *config.Config
 	filterInput             textinput.Model
+	ssoURLInput             textinput.Model
+	profileInput            textinput.Model
 	filtering               bool
+	configuringSSO          bool
+	configuringProfile      bool
+	selectedAuthMethod      int // For auth method selection screen
 	filter                  string
 	confirmAction           string
 	confirmInstanceID       string
@@ -88,6 +105,13 @@ type model struct {
 	commandSuggestions      []string // Command suggestions for tab completion
 	ssmInstanceID           string   // Store instance ID for SSM session launch
 	ssmRegion               string   // Store region for SSM session launch
+	ssoAuthenticator        *aws.SSOAuthenticator
+	ssoAccounts             []aws.SSOAccount
+	ssoFilteredAccounts     []aws.SSOAccount
+	ssoSelectedIndex        int
+	authConfig              *aws.AuthConfig
+	currentAccountID        string
+	currentAccountName      string
 }
 
 type instancesLoadedMsg struct {
@@ -185,23 +209,75 @@ type eksClusterDetailsLoadedMsg struct {
 	err        error
 }
 
+type ssoAuthCompletedMsg struct {
+	authenticator *aws.SSOAuthenticator
+	err           error
+}
+
+type ssoAccountsLoadedMsg struct {
+	accounts []aws.SSOAccount
+	err      error
+}
+
+type accountSwitchedMsg struct {
+	client      *aws.Client
+	accountID   string
+	accountName string
+	err         error
+}
+
 type kubeconfigUpdatedMsg struct {
 	clusterName string
 	err         error
 }
 
+type ssoConfigSavedMsg struct {
+	config *aws.SSOConfig
+	err    error
+}
+
 func initialModel(cfg *config.Config) model {
+	// Filter input
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
 	ti.Focus()
 	ti.CharLimit = 20
 	ti.Width = 20
 
+	// SSO URL input
+	ssoInput := textinput.New()
+	ssoInput.Placeholder = "https://d-xxxxxxxxxx.awsapps.com/start"
+	ssoInput.Focus()
+	ssoInput.CharLimit = 256
+	ssoInput.Width = 80
+
+	// Profile name input
+	profileInput := textinput.New()
+	profileInput.Placeholder = "default"
+	profileInput.Focus()
+	profileInput.CharLimit = 64
+	profileInput.Width = 40
+
+	// Load auth config if available
+	authConfig, _ := aws.LoadAuthConfig()
+
+	// Determine starting screen
+	startScreen := ec2Screen
+	if authConfig == nil {
+		startScreen = authMethodScreen
+	}
+
 	return model{
-		currentScreen:        ec2Screen,
-		loading:              true,
+		currentScreen:        startScreen,
+		loading:              authConfig != nil, // Only load if we have config
 		config:               cfg,
 		filterInput:          ti,
+		ssoURLInput:          ssoInput,
+		profileInput:         profileInput,
+		authConfig:           authConfig,
+		configuringSSO:       false,
+		configuringProfile:   false,
+		selectedAuthMethod:   0,
 		filtering:            false,
 		ec2SelectedInstances: make(map[string]bool),
 		autoRefresh:          false,
@@ -212,16 +288,93 @@ func initialModel(cfg *config.Config) model {
 }
 
 func (m model) Init() tea.Cmd {
+	// If auth config doesn't exist, stay on auth method selection screen
+	if m.authConfig == nil {
+		return nil
+	}
 	return m.initAWSClient
 }
 
 func (m model) initAWSClient() tea.Msg {
 	ctx := context.Background()
-	client, err := aws.NewClient(ctx, m.config)
+	var client *aws.Client
+	var err error
+
+	if m.authConfig == nil {
+		// No auth config, use default (env vars or ~/.aws/config)
+		client, err = aws.NewClient(ctx, m.config)
+	} else {
+		switch m.authConfig.Method {
+		case aws.AuthMethodEnv:
+			// Use environment variables (AWS SDK handles this automatically)
+			client, err = aws.NewClient(ctx, m.config)
+		case aws.AuthMethodProfile:
+			// Use specific AWS profile
+			client, err = aws.NewClientWithProfile(ctx, m.authConfig.ProfileName)
+			if client != nil {
+				// Override region from profile if configured
+				client.Region = m.config.Region
+			}
+		case aws.AuthMethodSSO:
+			// SSO will be handled via :account command
+			client, err = aws.NewClient(ctx, m.config)
+		default:
+			client, err = aws.NewClient(ctx, m.config)
+		}
+	}
+
 	if err != nil {
 		return instancesLoadedMsg{err: err}
 	}
 	return client
+}
+
+// SSO authentication and account switching functions
+func (m model) authenticateSSO(startURL, region string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		authenticator := aws.NewSSOAuthenticator(startURL, region)
+		err := authenticator.Authenticate(ctx)
+		return ssoAuthCompletedMsg{authenticator: authenticator, err: err}
+	}
+}
+
+func (m model) loadSSOAccounts() tea.Cmd {
+	return func() tea.Msg {
+		if m.ssoAuthenticator == nil {
+			return ssoAccountsLoadedMsg{err: fmt.Errorf("SSO not authenticated")}
+		}
+		ctx := context.Background()
+		accounts, err := m.ssoAuthenticator.ListAccounts(ctx)
+		return ssoAccountsLoadedMsg{accounts: accounts, err: err}
+	}
+}
+
+func (m model) switchToSSOAccount(account aws.SSOAccount, region string) tea.Cmd {
+	return func() tea.Msg {
+		if m.ssoAuthenticator == nil {
+			return accountSwitchedMsg{err: fmt.Errorf("SSO not authenticated")}
+		}
+		ctx := context.Background()
+
+		// Get credentials for the account/role
+		creds, err := m.ssoAuthenticator.GetCredentials(ctx, account.AccountID, account.RoleName)
+		if err != nil {
+			return accountSwitchedMsg{err: fmt.Errorf("failed to get credentials: %w", err)}
+		}
+
+		// Create new AWS client with SSO credentials
+		client, err := aws.NewClientWithSSOCredentials(ctx, creds, region, account.AccountName)
+		if err != nil {
+			return accountSwitchedMsg{err: fmt.Errorf("failed to create client: %w", err)}
+		}
+
+		return accountSwitchedMsg{
+			client:      client,
+			accountID:   account.AccountID,
+			accountName: account.AccountName,
+		}
+	}
 }
 
 func (m model) loadEC2Instances() tea.Msg {
@@ -499,6 +652,130 @@ func tickCmd() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle auth method selection screen
+	if m.currentScreen == authMethodScreen {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "up", "k":
+				if m.selectedAuthMethod > 0 {
+					m.selectedAuthMethod--
+				}
+			case "down", "j":
+				if m.selectedAuthMethod < maxAuthMethod {
+					m.selectedAuthMethod++
+				}
+			case "enter":
+				// Save selected auth method
+				switch m.selectedAuthMethod {
+				case 0: // Environment Variables
+					authConfig := &aws.AuthConfig{
+						Method: aws.AuthMethodEnv,
+					}
+					if err := aws.SaveAuthConfig(authConfig); err != nil {
+						m.statusMessage = fmt.Sprintf("Failed to save config: %v", err)
+						return m, nil
+					}
+					m.authConfig = authConfig
+					m.currentScreen = ec2Screen
+					m.loading = true
+					return m, m.initAWSClient
+				case 1: // AWS Profile
+					m.currentScreen = authProfileScreen
+					m.configuringProfile = true
+					return m, nil
+				case 2: // SSO
+					m.currentScreen = ssoConfigScreen
+					m.configuringSSO = true
+					return m, nil
+				}
+			case "esc":
+				return m, tea.Quit
+			}
+		}
+		return m, nil
+	}
+
+	// Handle AWS Profile configuration
+	if m.configuringProfile && m.currentScreen == authProfileScreen {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "enter":
+				profileName := m.profileInput.Value()
+				if profileName == "" {
+					profileName = "default"
+				}
+				if err := aws.ValidateProfileName(profileName); err != nil {
+					m.statusMessage = fmt.Sprintf("Invalid profile name: %v", err)
+					return m, nil
+				}
+				// Save profile config
+				authConfig := &aws.AuthConfig{
+					Method:      aws.AuthMethodProfile,
+					ProfileName: profileName,
+				}
+				if err := aws.SaveAuthConfig(authConfig); err != nil {
+					m.statusMessage = fmt.Sprintf("Failed to save config: %v", err)
+					return m, nil
+				}
+				m.authConfig = authConfig
+				m.configuringProfile = false
+				m.currentScreen = ec2Screen
+				m.loading = true
+				m.statusMessage = fmt.Sprintf("Using AWS profile: %s", profileName)
+				return m, m.initAWSClient
+			case "esc":
+				// Go back to auth method selection
+				m.currentScreen = authMethodScreen
+				m.configuringProfile = false
+				return m, nil
+			}
+		}
+		var cmd tea.Cmd
+		m.profileInput, cmd = m.profileInput.Update(msg)
+		return m, cmd
+	}
+
+	// Handle SSO URL configuration
+	if m.configuringSSO && m.currentScreen == ssoConfigScreen {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "enter":
+				ssoURL := m.ssoURLInput.Value()
+				if err := aws.ValidateSSOStartURL(ssoURL); err != nil {
+					m.statusMessage = fmt.Sprintf("Invalid SSO URL: %v", err)
+					return m, nil
+				}
+				// Save SSO config
+				authConfig := &aws.AuthConfig{
+					Method:      aws.AuthMethodSSO,
+					SSOStartURL: ssoURL,
+					SSORegion:   aws.DefaultSSORegion,
+				}
+				if err := aws.SaveAuthConfig(authConfig); err != nil {
+					m.statusMessage = fmt.Sprintf("Failed to save config: %v", err)
+					return m, nil
+				}
+				m.authConfig = authConfig
+				m.configuringSSO = false
+				m.currentScreen = ec2Screen
+				m.loading = true
+				m.statusMessage = "SSO configuration saved"
+				return m, m.initAWSClient
+			case "esc":
+				// Go back to auth method selection
+				m.currentScreen = authMethodScreen
+				m.configuringSSO = false
+				return m, nil
+			}
+		}
+		var cmd tea.Cmd
+		m.ssoURLInput, cmd = m.ssoURLInput.Update(msg)
+		return m, cmd
+	}
+
 	// Handle S3 delete confirmation dialog
 	if m.s3ConfirmDelete {
 		switch msg := msg.(type) {
@@ -744,6 +1021,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("Updated kubeconfig for cluster: %s", msg.clusterName)
 		}
 		return m, nil
+
+	case ssoAuthCompletedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("SSO authentication failed: %v", msg.err)
+			m.err = msg.err
+			return m, nil
+		}
+		m.ssoAuthenticator = msg.authenticator
+		m.statusMessage = "SSO authentication successful - loading accounts..."
+		// Load available accounts
+		return m, m.loadSSOAccounts()
+
+	case ssoAccountsLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to load accounts: %v", msg.err)
+			m.err = msg.err
+			return m, nil
+		}
+		m.ssoAccounts = msg.accounts
+		m.ssoSelectedIndex = 0
+		m.currentScreen = accountScreen
+		m.statusMessage = fmt.Sprintf("Loaded %d accounts - select one to continue", len(msg.accounts))
+		return m, nil
+
+	case accountSwitchedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to switch account: %v", msg.err)
+			m.err = msg.err
+			return m, nil
+		}
+		// Update client and account info
+		m.awsClient = msg.client
+		m.currentAccountID = msg.accountID
+		m.currentAccountName = msg.accountName
+		// Switch to EC2 screen and load instances
+		m.currentScreen = ec2Screen
+		m.viewportOffset = 0
+		m.statusMessage = fmt.Sprintf("Switched to account: %s", msg.accountName)
+		return m, m.loadEC2Instances
 
 	case objectsLoadedMsg:
 		m.loading = false
@@ -1033,6 +1352,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.loading = true
 					m.viewportOffset = 0
 					return m, m.loadEKSClusterDetails(selectedCluster.Name)
+				}
+			} else if m.currentScreen == accountScreen {
+				// Switch to selected AWS account
+				accounts := m.ssoAccounts
+				if len(m.ssoFilteredAccounts) > 0 {
+					accounts = m.ssoFilteredAccounts
+				}
+				if len(accounts) > 0 && m.ssoSelectedIndex < len(accounts) {
+					selectedAccount := accounts[m.ssoSelectedIndex]
+					m.loading = true
+					m.viewportOffset = 0
+					m.statusMessage = fmt.Sprintf("Switching to account: %s (%s)", selectedAccount.AccountName, selectedAccount.AccountID)
+					return m, m.switchToSSOAccount(selectedAccount, m.config.Region)
 				}
 			}
 		case "c":
@@ -1437,6 +1769,16 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 
 	// Determine current list and index (use filtered list if active)
 	switch m.currentScreen {
+	case accountScreen:
+		if len(m.ssoFilteredAccounts) > 0 {
+			listLength = len(m.ssoFilteredAccounts)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.ssoAccounts)
+		}
+		currentIndex = m.ssoSelectedIndex
 	case ec2Screen:
 		if len(m.ec2FilteredInstances) > 0 {
 			listLength = len(m.ec2FilteredInstances)
@@ -1467,6 +1809,16 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 			listLength = len(m.s3Objects)
 		}
 		currentIndex = m.s3ObjectSelectedIndex
+	case eksScreen:
+		if len(m.eksFilteredClusters) > 0 {
+			listLength = len(m.eksFilteredClusters)
+		} else if m.vimState.LastSearch != "" {
+			// Search active but no results
+			return
+		} else {
+			listLength = len(m.eksClusters)
+		}
+		currentIndex = m.eksSelectedIndex
 	default:
 		return // No navigation for other screens
 	}
@@ -1520,6 +1872,10 @@ func (m *model) handleDetailViewScroll(action vim.NavigationAction) {
 
 func (m *model) setSelectedIndex(index int) {
 	switch m.currentScreen {
+	case accountScreen:
+		if index >= 0 && index < len(m.ssoAccounts) {
+			m.ssoSelectedIndex = index
+		}
 	case ec2Screen:
 		if index >= 0 && index < len(m.ec2Instances) {
 			m.ec2SelectedIndex = index
@@ -1544,6 +1900,18 @@ func (m *model) applyVimSearch() {
 	var searchItems []string
 
 	switch m.currentScreen {
+	case accountScreen:
+		for _, acc := range m.ssoAccounts {
+			var sb strings.Builder
+			sb.WriteString(acc.AccountID)
+			sb.WriteString(" ")
+			sb.WriteString(acc.AccountName)
+			sb.WriteString(" ")
+			sb.WriteString(acc.RoleName)
+			sb.WriteString(" ")
+			sb.WriteString(acc.EmailAddress)
+			searchItems = append(searchItems, strings.ToLower(sb.String()))
+		}
 	case ec2Screen:
 		for _, inst := range m.ec2Instances {
 			searchItems = append(searchItems,
@@ -1571,6 +1939,11 @@ func (m *model) applyVimSearch() {
 	// Filter the view to only show matching items
 	if len(m.vimState.SearchResults) > 0 {
 		switch m.currentScreen {
+		case accountScreen:
+			m.ssoFilteredAccounts = make([]aws.SSOAccount, 0, len(m.vimState.SearchResults))
+			for _, idx := range m.vimState.SearchResults {
+				m.ssoFilteredAccounts = append(m.ssoFilteredAccounts, m.ssoAccounts[idx])
+			}
 		case ec2Screen:
 			m.ec2FilteredInstances = make([]aws.Instance, 0, len(m.vimState.SearchResults))
 			for _, idx := range m.vimState.SearchResults {
@@ -1600,6 +1973,8 @@ func (m *model) applyVimSearch() {
 		m.statusMessage = "No matches found"
 		// Clear filtered lists to show "no matches"
 		switch m.currentScreen {
+		case accountScreen:
+			m.ssoFilteredAccounts = []aws.SSOAccount{}
 		case ec2Screen:
 			m.ec2FilteredInstances = []aws.Instance{}
 		case s3Screen:
@@ -1704,6 +2079,29 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 			return m.loadEKSClusters
 		}
 		m.statusMessage = "Switched to EKS"
+
+	case vim.CmdAccount, "acc":
+		// Switch to account selection screen
+		// Only works with SSO auth method
+		if m.authConfig == nil || m.authConfig.Method != aws.AuthMethodSSO {
+			m.statusMessage = "Account switching only available with SSO authentication"
+			return nil
+		}
+
+		if m.ssoAuthenticator == nil {
+			// Start SSO authentication flow
+			m.loading = true
+			m.statusMessage = "Starting SSO authentication - opening browser..."
+			return m.authenticateSSO(m.authConfig.SSOStartURL, m.authConfig.SSORegion)
+		}
+		// Show account selection screen
+		m.currentScreen = accountScreen
+		m.viewportOffset = 0
+		if len(m.ssoAccounts) == 0 {
+			m.loading = true
+			return m.loadSSOAccounts()
+		}
+		m.statusMessage = "Account selection"
 
 	default:
 		m.statusMessage = fmt.Sprintf("Unknown command: %s", cmd.Name)
@@ -1836,6 +2234,14 @@ func (m model) View() string {
 
 	var content string
 	switch m.currentScreen {
+	case authMethodScreen:
+		content = m.renderAuthMethodSelection()
+	case authProfileScreen:
+		content = m.renderProfileConfig()
+	case ssoConfigScreen:
+		content = m.renderSSOConfig()
+	case accountScreen:
+		content = m.renderAccountSelection()
 	case ec2Screen:
 		content = m.renderEC2()
 	case ec2DetailsScreen:
@@ -1952,6 +2358,18 @@ func (m model) renderK9sHeader() string {
 	// Service name (like "Context" in k9s)
 	var serviceName, viewName string
 	switch m.currentScreen {
+	case authMethodScreen:
+		serviceName = "Setup"
+		viewName = "Authentication"
+	case authProfileScreen:
+		serviceName = "Setup"
+		viewName = "AWS Profile"
+	case ssoConfigScreen:
+		serviceName = "Setup"
+		viewName = "SSO Configuration"
+	case accountScreen:
+		serviceName = "AWS"
+		viewName = "Account Selection"
 	case ec2Screen:
 		serviceName = "EC2"
 		viewName = "Instances"
@@ -1980,6 +2398,17 @@ func (m model) renderK9sHeader() string {
 
 	if m.awsClient != nil {
 		leftSide.WriteString(labelStyle.Render("Region:  ") + valueStyle.Render(m.awsClient.GetRegion()) + "\n")
+
+		// Display account information if available
+		if m.currentAccountName != "" {
+			leftSide.WriteString(labelStyle.Render("Account: ") + valueStyle.Render(m.currentAccountName))
+			if m.currentAccountID != "" {
+				leftSide.WriteString(valueStyle.Render(fmt.Sprintf(" (%s)", m.currentAccountID)))
+			}
+			leftSide.WriteString("\n")
+		} else if m.awsClient.GetAccountID() != "" {
+			leftSide.WriteString(labelStyle.Render("Account: ") + valueStyle.Render(m.awsClient.GetAccountID()) + "\n")
+		}
 	}
 
 	// Add version info (like K9s Rev)
@@ -2196,6 +2625,216 @@ func (m model) renderK9sBreadcrumb() string {
 	}
 
 	return result.String()
+}
+
+func (m model) renderAuthMethodSelection() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	instructionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("51")).Bold(true)
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+
+	var content strings.Builder
+
+	content.WriteString(titleStyle.Render("Welcome to lazyaws!") + "\n\n")
+	content.WriteString(labelStyle.Render("Choose your AWS authentication method:") + "\n\n")
+
+	// Option 0: Environment Variables
+	envAvailable := aws.CheckEnvVarsAvailable()
+	envText := "Environment Variables"
+	if envAvailable {
+		envText += " (detected)"
+	}
+	if m.selectedAuthMethod == 0 {
+		content.WriteString(selectedStyle.Render("> "+envText) + "\n")
+	} else {
+		content.WriteString(normalStyle.Render("  "+envText) + "\n")
+	}
+	content.WriteString(instructionStyle.Render("  Uses AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY") + "\n\n")
+
+	// Option 1: AWS Profile
+	profileText := "AWS Profile"
+	if m.selectedAuthMethod == 1 {
+		content.WriteString(selectedStyle.Render("> "+profileText) + "\n")
+	} else {
+		content.WriteString(normalStyle.Render("  "+profileText) + "\n")
+	}
+	content.WriteString(instructionStyle.Render("  Uses credentials from ~/.aws/config or ~/.aws/credentials") + "\n\n")
+
+	// Option 2: SSO
+	ssoText := "AWS SSO (IAM Identity Center)"
+	if m.selectedAuthMethod == 2 {
+		content.WriteString(selectedStyle.Render("> "+ssoText) + "\n")
+	} else {
+		content.WriteString(normalStyle.Render("  "+ssoText) + "\n")
+	}
+	content.WriteString(instructionStyle.Render("  Uses AWS Single Sign-On for multi-account access") + "\n\n\n")
+
+	content.WriteString(instructionStyle.Render("Use ↑/↓ or j/k to select | Enter to continue | ESC to quit") + "\n")
+
+	return content.String()
+}
+
+func (m model) renderProfileConfig() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	instructionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+
+	var content strings.Builder
+
+	content.WriteString(titleStyle.Render("AWS Profile Configuration") + "\n\n")
+	content.WriteString(labelStyle.Render("Enter the name of your AWS profile:") + "\n\n")
+
+	content.WriteString(instructionStyle.Render("This should match a profile name in:") + "\n")
+	content.WriteString(instructionStyle.Render("  • ~/.aws/credentials") + "\n")
+	content.WriteString(instructionStyle.Render("  • ~/.aws/config") + "\n\n")
+
+	content.WriteString(instructionStyle.Render("Common profile names: default, dev, prod, staging") + "\n\n")
+
+	content.WriteString(labelStyle.Render("Profile name:") + "\n")
+	content.WriteString(m.profileInput.View() + "\n\n")
+
+	if m.statusMessage != "" {
+		content.WriteString(errorStyle.Render(m.statusMessage) + "\n\n")
+	}
+
+	content.WriteString(instructionStyle.Render("Press Enter to save | ESC to go back") + "\n")
+
+	return content.String()
+}
+
+func (m model) renderSSOConfig() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	instructionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+
+	var content strings.Builder
+
+	content.WriteString(titleStyle.Render("AWS SSO Configuration") + "\n\n")
+	content.WriteString(labelStyle.Render("To use lazyaws, you need to configure your AWS SSO (IAM Identity Center) start URL.") + "\n\n")
+
+	content.WriteString(instructionStyle.Render("This is typically a URL like:") + "\n")
+	content.WriteString(instructionStyle.Render("  https://d-xxxxxxxxxx.awsapps.com/start") + "\n\n")
+
+	content.WriteString(instructionStyle.Render("You can find this URL in:") + "\n")
+	content.WriteString(instructionStyle.Render("  • AWS IAM Identity Center console") + "\n")
+	content.WriteString(instructionStyle.Render("  • Your AWS SSO login page") + "\n")
+	content.WriteString(instructionStyle.Render("  • Your organization's AWS access portal") + "\n\n")
+
+	content.WriteString(labelStyle.Render("Enter your SSO Start URL:") + "\n")
+	content.WriteString(m.ssoURLInput.View() + "\n\n")
+
+	if m.statusMessage != "" {
+		content.WriteString(errorStyle.Render(m.statusMessage) + "\n\n")
+	}
+
+	content.WriteString(instructionStyle.Render("Press Enter to save | ESC to go back") + "\n")
+
+	return content.String()
+}
+
+func (m model) renderAccountSelection() string {
+	title := lipgloss.NewStyle().Bold(true).Render("AWS Account Selection")
+	if m.vimState.LastSearch != "" {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(fmt.Sprintf(" [search: %s]", m.vimState.LastSearch))
+	}
+
+	if m.loading {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("Loading accounts...")
+	}
+
+	if m.err != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		return title + "\n\n" + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	}
+
+	// Use filtered accounts if VIM search is active, otherwise use all accounts
+	accounts := m.ssoAccounts
+	if len(m.ssoFilteredAccounts) > 0 {
+		accounts = m.ssoFilteredAccounts
+	} else if m.vimState.LastSearch != "" {
+		// Search is active but no results
+		accounts = []aws.SSOAccount{}
+	}
+
+	if len(accounts) == 0 {
+		if m.vimState.LastSearch != "" {
+			return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No accounts match your search")
+		}
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No accounts found")
+	}
+
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.ssoSelectedIndex, len(accounts))
+	start, end := m.getVisibleRange(len(accounts))
+
+	// Build table header (k9s style)
+	var content strings.Builder
+
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	searchInfo := ""
+	if m.vimState.LastSearch != "" {
+		searchInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Render("(" + m.vimState.LastSearch + ")")
+	}
+	tableTitle := fmt.Sprintf("AWS-Accounts%s[%d]", searchInfo, len(accounts))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	titleWidth := len(tableTitle)
+	totalWidth := 120
+	dashesWidth := (totalWidth - titleWidth - 2) / 2
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
+
+	// Table header - k9s uses uppercase and symbols
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-30s %-20s %-35s %-30s",
+		"ACCOUNT NAME", "ACCOUNT ID", "ROLE", "EMAIL")) + "\n")
+
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		account := accounts[i]
+
+		// Build row with proper spacing
+		row := fmt.Sprintf("%-30s %-20s %-35s %-30s",
+			truncate(account.AccountName, 30),
+			account.AccountID,
+			truncate(account.RoleName, 35),
+			truncate(account.EmailAddress, 30),
+		)
+
+		if i == m.ssoSelectedIndex {
+			// Highlight the selected row - k9s style with cyan background
+			for len(row) < 118 {
+				row += " "
+			}
+			selectedStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("51")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
+			content.WriteString(selectedStyle.Render(row) + "\n")
+		} else {
+			// Normal row
+			normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+			content.WriteString(normalStyle.Render(row) + "\n")
+		}
+	}
+
+	// Add scroll indicators
+	if start > 0 || end < len(accounts) {
+		scrollInfo := fmt.Sprintf("\n[Showing %d-%d of %d | Use j/k or ↓/↑ to navigate]", start+1, end, len(accounts))
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(scrollInfo))
+	}
+
+	return content.String()
 }
 
 func (m model) renderEC2() string {
