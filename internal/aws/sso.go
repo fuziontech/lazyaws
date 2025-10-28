@@ -96,7 +96,11 @@ func (a *SSOAuthenticator) Authenticate(ctx context.Context) error {
 	// Open browser for user authentication
 	verificationURL := *deviceAuthResp.VerificationUriComplete
 	if err := openBrowser(verificationURL); err != nil {
-		return fmt.Errorf("failed to open browser: %w", err)
+		// If browser fails to open, provide the URL for manual navigation
+		fmt.Fprintf(os.Stderr, "\nUnable to open browser automatically.\n")
+		fmt.Fprintf(os.Stderr, "Please navigate to the following URL to complete authentication:\n\n")
+		fmt.Fprintf(os.Stderr, "  %s\n\n", verificationURL)
+		fmt.Fprintf(os.Stderr, "Waiting for authentication to complete...\n\n")
 	}
 
 	// Poll for token
@@ -316,12 +320,32 @@ func (a *SSOAuthenticator) saveCachedSession() error {
 // openBrowser opens the default browser to the given URL
 func openBrowser(url string) error {
 	var cmd *exec.Cmd
+	var candidates [][]string
 
 	switch runtime.GOOS {
 	case "darwin":
 		cmd = exec.Command("open", url)
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		// Try multiple browsers in order of preference
+		candidates = [][]string{
+			{"xdg-open", url},
+			{"sensible-browser", url},
+			{"firefox", url},
+			{"google-chrome", url},
+			{"chromium", url},
+		}
+
+		// Try each candidate until one succeeds
+		var lastErr error
+		for _, args := range candidates {
+			cmd = exec.Command(args[0], args[1:]...)
+			if err := cmd.Start(); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		return fmt.Errorf("failed to open browser (tried xdg-open, sensible-browser, firefox, chrome, chromium): %w", lastErr)
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default:
