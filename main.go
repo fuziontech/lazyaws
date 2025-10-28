@@ -926,6 +926,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case *aws.Client:
 		m.awsClient = msg
+		// Clear stale data when switching accounts/regions
+		m.ec2Instances = nil
+		m.s3Buckets = nil
+		m.eksClusters = nil
+		m.clearSearch()
 		if m.autoRefresh {
 			return m, tea.Batch(m.loadEC2Instances, tickCmd())
 		}
@@ -1080,9 +1085,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.awsClient = msg.client
 		m.currentAccountID = msg.accountID
 		m.currentAccountName = msg.accountName
+		// Clear stale data when switching accounts
+		m.ec2Instances = nil
+		m.s3Buckets = nil
+		m.eksClusters = nil
+		m.clearSearch()
 		// Switch to EC2 screen and load instances
 		m.currentScreen = ec2Screen
 		m.viewportOffset = 0
+		m.loading = true // Show loading state
 		m.statusMessage = fmt.Sprintf("Switched to account: %s", msg.accountName)
 		return m, m.loadEC2Instances
 
