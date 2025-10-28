@@ -75,6 +75,7 @@ type model struct {
 	s3ConfirmDelete         bool
 	s3DeleteTarget          string // "object" or "bucket"
 	s3DeleteKey             string
+	deleteConfirmInput      textinput.Model // For typing confirmation
 	eksClusters             []aws.EKSCluster
 	eksFilteredClusters     []aws.EKSCluster // VIM-filtered view
 	eksSelectedIndex        int
@@ -258,6 +259,12 @@ func initialModel(cfg *config.Config) model {
 	profileInput.CharLimit = 64
 	profileInput.Width = 40
 
+	// Delete confirmation input
+	deleteInput := textinput.New()
+	deleteInput.Placeholder = "Type name to confirm"
+	deleteInput.CharLimit = 256
+	deleteInput.Width = 80
+
 	// Load auth config if available
 	authConfig, _ := aws.LoadAuthConfig()
 
@@ -274,6 +281,7 @@ func initialModel(cfg *config.Config) model {
 		filterInput:          ti,
 		ssoURLInput:          ssoInput,
 		profileInput:         profileInput,
+		deleteConfirmInput:   deleteInput,
 		authConfig:           authConfig,
 		configuringSSO:       false,
 		configuringProfile:   false,
@@ -781,23 +789,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
-			case "y", "Y":
-				m.loading = true
-				m.s3ConfirmDelete = false
-				if m.s3DeleteTarget == "object" {
-					return m, m.deleteS3Object(m.s3CurrentBucket, m.s3DeleteKey)
-				} else if m.s3DeleteTarget == "bucket" {
-					return m, m.deleteS3Bucket(m.s3DeleteKey)
+			case "enter":
+				// Check if typed value matches the item to delete
+				if m.deleteConfirmInput.Value() == m.s3DeleteKey {
+					m.loading = true
+					m.s3ConfirmDelete = false
+					m.deleteConfirmInput.SetValue("")
+					if m.s3DeleteTarget == "object" {
+						return m, m.deleteS3Object(m.s3CurrentBucket, m.s3DeleteKey)
+					} else if m.s3DeleteTarget == "bucket" {
+						return m, m.deleteS3Bucket(m.s3DeleteKey)
+					}
+				} else {
+					m.statusMessage = "Name doesn't match - delete cancelled"
+					m.s3ConfirmDelete = false
+					m.s3DeleteTarget = ""
+					m.s3DeleteKey = ""
+					m.deleteConfirmInput.SetValue("")
+					return m, nil
 				}
-			case "n", "N", "esc":
+			case "esc":
 				m.s3ConfirmDelete = false
 				m.s3DeleteTarget = ""
 				m.s3DeleteKey = ""
+				m.deleteConfirmInput.SetValue("")
 				m.statusMessage = "Delete cancelled"
 				return m, nil
 			}
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.deleteConfirmInput, cmd = m.deleteConfirmInput.Update(msg)
+		return m, cmd
 	}
 
 	// Handle EC2 confirmation dialog
@@ -1513,7 +1535,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.s3ConfirmDelete = true
 						m.s3DeleteTarget = "object"
 						m.s3DeleteKey = selectedObject.Key
-						m.statusMessage = fmt.Sprintf("Delete %s? (y/n)", selectedObject.Key)
+						m.deleteConfirmInput.SetValue("")
+						m.deleteConfirmInput.Focus()
+						m.statusMessage = fmt.Sprintf("Type the object name to confirm deletion: %s", selectedObject.Key)
 						return m, nil
 					}
 				}
@@ -1528,7 +1552,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.s3ConfirmDelete = true
 					m.s3DeleteTarget = "bucket"
 					m.s3DeleteKey = selectedBucket.Name
-					m.statusMessage = fmt.Sprintf("Delete bucket %s? Bucket must be empty! (y/n)", selectedBucket.Name)
+					m.deleteConfirmInput.SetValue("")
+					m.deleteConfirmInput.Focus()
+					m.statusMessage = fmt.Sprintf("Type the bucket name to confirm deletion (bucket must be empty!): %s", selectedBucket.Name)
 					return m, nil
 				}
 			}
@@ -2285,6 +2311,16 @@ func (m model) View() string {
 	}
 
 	s += contentStyle.Render(content) + "\n"
+
+	// Show delete confirmation input
+	if m.s3ConfirmDelete {
+		confirmStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("1")).
+			Bold(true)
+		s += "\n" + confirmStyle.Render("DELETE CONFIRMATION")
+		s += "\n" + m.deleteConfirmInput.View()
+		s += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Press ESC to cancel")
+	}
 
 	// Show VIM mode indicator
 	if m.vimState.Mode == vim.SearchMode {
