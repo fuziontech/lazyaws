@@ -2218,25 +2218,23 @@ func (m model) View() string {
 	s += m.renderK9sHeader() + "\n"
 
 	// Content area
-	// Set max height to prevent overflow and top clipping
-	// For auth screens (simpler header), use less restrictive height
-	// For main screens (full header with hints), use more restrictive height
-	// Leave room for header + border (2) + padding (2) + breadcrumb (1) + newlines (2)
-	maxContentHeight := m.height - 10 // Default: ~8 lines overhead
-	if m.currentScreen >= ec2Screen {
-		// Main screens have larger headers with key hints
-		maxContentHeight = m.height - 12 // ~12 lines overhead
-	}
-	if maxContentHeight < 10 {
-		maxContentHeight = 10
-	}
-
 	contentStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
 		Padding(1, 2).
-		MaxHeight(maxContentHeight).
 		Width(m.width - 2) // Full width minus small margin
+
+	// Only apply MaxHeight for main screens that need viewport control
+	// Auth screens should show full content
+	if m.currentScreen >= ec2Screen {
+		// Set max height to prevent overflow and top clipping
+		// Leave room for header + border (2) + padding (2) + breadcrumb (1) + newlines (2)
+		maxContentHeight := m.height - 12
+		if maxContentHeight < 10 {
+			maxContentHeight = 10
+		}
+		contentStyle = contentStyle.MaxHeight(maxContentHeight)
+	}
 
 	var content string
 	switch m.currentScreen {
