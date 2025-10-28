@@ -20,7 +20,8 @@ import (
 type screen int
 
 const (
-	accountScreen screen = iota
+	ssoConfigScreen screen = iota
+	accountScreen
 	ec2Screen
 	ec2DetailsScreen
 	s3Screen
@@ -74,7 +75,9 @@ type model struct {
 	err                     error
 	config                  *config.Config
 	filterInput             textinput.Model
+	ssoURLInput             textinput.Model
 	filtering               bool
+	configuringSSO          bool
 	filter                  string
 	confirmAction           string
 	confirmInstanceID       string
@@ -93,6 +96,7 @@ type model struct {
 	ssoAccounts             []aws.SSOAccount
 	ssoFilteredAccounts     []aws.SSOAccount
 	ssoSelectedIndex        int
+	ssoConfig               *aws.SSOConfig
 	currentAccountID        string
 	currentAccountName      string
 }
@@ -214,18 +218,43 @@ type kubeconfigUpdatedMsg struct {
 	err         error
 }
 
+type ssoConfigSavedMsg struct {
+	config *aws.SSOConfig
+	err    error
+}
+
 func initialModel(cfg *config.Config) model {
+	// Filter input
 	ti := textinput.New()
 	ti.Placeholder = "<name>, <id>, state=<state> or tag:key=value"
 	ti.Focus()
 	ti.CharLimit = 20
 	ti.Width = 20
 
+	// SSO URL input
+	ssoInput := textinput.New()
+	ssoInput.Placeholder = "https://d-xxxxxxxxxx.awsapps.com/start"
+	ssoInput.Focus()
+	ssoInput.CharLimit = 256
+	ssoInput.Width = 80
+
+	// Load SSO config if available
+	ssoConfig, _ := aws.LoadSSOConfig()
+
+	// Determine starting screen
+	startScreen := ec2Screen
+	if ssoConfig == nil {
+		startScreen = ssoConfigScreen
+	}
+
 	return model{
-		currentScreen:        ec2Screen,
-		loading:              true,
+		currentScreen:        startScreen,
+		loading:              ssoConfig != nil, // Only load if we have config
 		config:               cfg,
 		filterInput:          ti,
+		ssoURLInput:          ssoInput,
+		ssoConfig:            ssoConfig,
+		configuringSSO:       ssoConfig == nil,
 		filtering:            false,
 		ec2SelectedInstances: make(map[string]bool),
 		autoRefresh:          false,
@@ -236,6 +265,10 @@ func initialModel(cfg *config.Config) model {
 }
 
 func (m model) Init() tea.Cmd {
+	// If SSO config doesn't exist, stay on config screen
+	if m.ssoConfig == nil {
+		return nil
+	}
 	return m.initAWSClient
 }
 
@@ -571,6 +604,41 @@ func tickCmd() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle SSO URL configuration
+	if m.configuringSSO && m.currentScreen == ssoConfigScreen {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "enter":
+				ssoURL := m.ssoURLInput.Value()
+				if err := aws.ValidateSSOStartURL(ssoURL); err != nil {
+					m.statusMessage = fmt.Sprintf("Invalid SSO URL: %v", err)
+					return m, nil
+				}
+				// Save SSO config
+				config := &aws.SSOConfig{
+					StartURL: ssoURL,
+					Region:   aws.DefaultSSORegion,
+				}
+				if err := aws.SaveSSOConfig(config); err != nil {
+					m.statusMessage = fmt.Sprintf("Failed to save config: %v", err)
+					return m, nil
+				}
+				m.ssoConfig = config
+				m.configuringSSO = false
+				m.currentScreen = ec2Screen
+				m.loading = true
+				m.statusMessage = "SSO configuration saved"
+				return m, m.initAWSClient
+			case "esc":
+				return m, tea.Quit
+			}
+		}
+		var cmd tea.Cmd
+		m.ssoURLInput, cmd = m.ssoURLInput.Update(msg)
+		return m, cmd
+	}
+
 	// Handle S3 delete confirmation dialog
 	if m.s3ConfirmDelete {
 		switch msg := msg.(type) {
@@ -1871,11 +1939,15 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 	case vim.CmdAccount, "acc":
 		// Switch to account selection screen
 		if m.ssoAuthenticator == nil {
+			// Check if we have SSO config
+			if m.ssoConfig == nil {
+				m.statusMessage = "SSO not configured - please restart lazyaws"
+				return nil
+			}
 			// Start SSO authentication flow
 			m.loading = true
 			m.statusMessage = "Starting SSO authentication - opening browser..."
-			// TODO: Make these configurable
-			return m.authenticateSSO("", "") // Use defaults from sso.go
+			return m.authenticateSSO(m.ssoConfig.StartURL, m.ssoConfig.Region)
 		}
 		// Show account selection screen
 		m.currentScreen = accountScreen
@@ -2017,6 +2089,8 @@ func (m model) View() string {
 
 	var content string
 	switch m.currentScreen {
+	case ssoConfigScreen:
+		content = m.renderSSOConfig()
 	case accountScreen:
 		content = m.renderAccountSelection()
 	case ec2Screen:
@@ -2135,6 +2209,9 @@ func (m model) renderK9sHeader() string {
 	// Service name (like "Context" in k9s)
 	var serviceName, viewName string
 	switch m.currentScreen {
+	case ssoConfigScreen:
+		serviceName = "Setup"
+		viewName = "SSO Configuration"
 	case accountScreen:
 		serviceName = "AWS"
 		viewName = "Account Selection"
@@ -2393,6 +2470,37 @@ func (m model) renderK9sBreadcrumb() string {
 	}
 
 	return result.String()
+}
+
+func (m model) renderSSOConfig() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	instructionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+
+	var content strings.Builder
+
+	content.WriteString(titleStyle.Render("AWS SSO Configuration") + "\n\n")
+	content.WriteString(labelStyle.Render("To use lazyaws, you need to configure your AWS SSO (IAM Identity Center) start URL.") + "\n\n")
+
+	content.WriteString(instructionStyle.Render("This is typically a URL like:") + "\n")
+	content.WriteString(instructionStyle.Render("  https://d-xxxxxxxxxx.awsapps.com/start") + "\n\n")
+
+	content.WriteString(instructionStyle.Render("You can find this URL in:") + "\n")
+	content.WriteString(instructionStyle.Render("  • AWS IAM Identity Center console") + "\n")
+	content.WriteString(instructionStyle.Render("  • Your AWS SSO login page") + "\n")
+	content.WriteString(instructionStyle.Render("  • Your organization's AWS access portal") + "\n\n")
+
+	content.WriteString(labelStyle.Render("Enter your SSO Start URL:") + "\n")
+	content.WriteString(m.ssoURLInput.View() + "\n\n")
+
+	if m.statusMessage != "" {
+		content.WriteString(errorStyle.Render(m.statusMessage) + "\n\n")
+	}
+
+	content.WriteString(instructionStyle.Render("Press Enter to save | ESC to quit") + "\n")
+
+	return content.String()
 }
 
 func (m model) renderAccountSelection() string {

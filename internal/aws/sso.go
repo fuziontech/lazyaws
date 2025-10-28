@@ -17,11 +17,10 @@ import (
 )
 
 const (
-	// Default SSO configuration - can be overridden
-	DefaultSSOStartURL = "https://d-9067c0f74a.awsapps.com/start" // Replace with your SSO start URL
-	DefaultSSORegion   = "us-east-1"
-	ClientName         = "lazyaws"
-	ClientType         = "public"
+	// Default SSO configuration
+	DefaultSSORegion = "us-east-1"
+	ClientName       = "lazyaws"
+	ClientType       = "public"
 )
 
 // SSOSession represents an active SSO session with cached tokens
@@ -52,9 +51,6 @@ type SSOAuthenticator struct {
 
 // NewSSOAuthenticator creates a new SSO authenticator
 func NewSSOAuthenticator(startURL, region string) *SSOAuthenticator {
-	if startURL == "" {
-		startURL = DefaultSSOStartURL
-	}
 	if region == "" {
 		region = DefaultSSORegion
 	}
