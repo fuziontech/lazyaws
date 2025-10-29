@@ -107,6 +107,7 @@ type model struct {
 	ssmInstanceID           string   // Store instance ID for SSM session launch
 	ssmRegion               string   // Store region for SSM session launch
 	ssoAuthenticator        *aws.SSOAuthenticator
+	ssoCredentials          *aws.SSOCredentials // Current SSO credentials for passing to CLI
 	ssoAccounts             []aws.SSOAccount
 	ssoFilteredAccounts     []aws.SSOAccount
 	ssoSelectedIndex        int
@@ -224,6 +225,7 @@ type accountSwitchedMsg struct {
 	client      *aws.Client
 	accountID   string
 	accountName string
+	credentials *aws.SSOCredentials // SSO credentials for CLI commands
 	err         error
 }
 
@@ -398,6 +400,7 @@ func (m model) switchToSSOAccount(account aws.SSOAccount, region string) tea.Cmd
 			client:      client,
 			accountID:   account.AccountID,
 			accountName: account.AccountName,
+			credentials: creds,
 		}
 	}
 }
@@ -1102,6 +1105,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.awsClient = msg.client
 		m.currentAccountID = msg.accountID
 		m.currentAccountName = msg.accountName
+		m.ssoCredentials = msg.credentials // Store SSO credentials for CLI commands
 		// Clear stale data when switching accounts
 		m.ec2Instances = nil
 		m.s3Buckets = nil
@@ -3996,6 +4000,17 @@ func main() {
 		ssmCmd.Stdin = os.Stdin
 		ssmCmd.Stdout = os.Stdout
 		ssmCmd.Stderr = os.Stderr
+
+		// If using SSO credentials, pass them as environment variables to AWS CLI
+		if m.ssoCredentials != nil {
+			// Clone current environment and add AWS credentials
+			ssmCmd.Env = os.Environ()
+			ssmCmd.Env = append(ssmCmd.Env,
+				fmt.Sprintf("AWS_ACCESS_KEY_ID=%s", m.ssoCredentials.AccessKeyID),
+				fmt.Sprintf("AWS_SECRET_ACCESS_KEY=%s", m.ssoCredentials.SecretAccessKey),
+				fmt.Sprintf("AWS_SESSION_TOKEN=%s", m.ssoCredentials.SessionToken),
+			)
+		}
 
 		// Run the command - let it handle signals naturally
 		err = ssmCmd.Run()
