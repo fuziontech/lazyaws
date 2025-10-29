@@ -24,6 +24,7 @@ const (
 	authProfileScreen
 	ssoConfigScreen
 	accountScreen
+	regionScreen
 	ec2Screen
 	ec2DetailsScreen
 	s3Screen
@@ -111,6 +112,8 @@ type model struct {
 	ssoAccounts             []aws.SSOAccount
 	ssoFilteredAccounts     []aws.SSOAccount
 	ssoSelectedIndex        int
+	regionSelectedIndex     int    // Selected region in region selection screen
+	previousScreen          screen // Screen to return to after region selection
 	authConfig              *aws.AuthConfig
 	currentAccountID        string
 	currentAccountName      string
@@ -1244,6 +1247,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			// ESC key to dismiss S3 info popup or clear presigned URL or clear search or go back from details view
+			if m.currentScreen == regionScreen {
+				// Go back to previous screen without changing region
+				m.currentScreen = m.previousScreen
+				m.viewportOffset = 0
+				m.statusMessage = "Region selection cancelled"
+				return m, nil
+			}
 			if m.s3ShowingInfo {
 				m.s3ShowingInfo = false
 				m.s3InfoType = ""
@@ -1342,7 +1352,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter", "i":
 			// Enter key to view instance details or browse S3 bucket, or view object details
-			if m.currentScreen == ec2Screen {
+			if m.currentScreen == regionScreen {
+				// Select region and switch back to previous screen
+				if m.config != nil && m.regionSelectedIndex < len(m.config.Regions) {
+					selectedRegion := m.config.Regions[m.regionSelectedIndex]
+					m.config.Region = selectedRegion
+					m.currentScreen = m.previousScreen
+					m.viewportOffset = 0
+					m.loading = true
+					m.statusMessage = fmt.Sprintf("Switching to region: %s", selectedRegion)
+					return m, m.initAWSClient
+				}
+			} else if m.currentScreen == ec2Screen {
 				// Use filtered list if active
 				instances := m.ec2Instances
 				if len(m.ec2FilteredInstances) > 0 {
@@ -1843,6 +1864,11 @@ func (m *model) handleVimNavigation(action vim.NavigationAction) {
 
 	// Determine current list and index (use filtered list if active)
 	switch m.currentScreen {
+	case regionScreen:
+		if m.config != nil {
+			listLength = len(m.config.Regions)
+		}
+		currentIndex = m.regionSelectedIndex
 	case accountScreen:
 		if len(m.ssoFilteredAccounts) > 0 {
 			listLength = len(m.ssoFilteredAccounts)
@@ -1946,6 +1972,10 @@ func (m *model) handleDetailViewScroll(action vim.NavigationAction) {
 
 func (m *model) setSelectedIndex(index int) {
 	switch m.currentScreen {
+	case regionScreen:
+		if m.config != nil && index >= 0 && index < len(m.config.Regions) {
+			m.regionSelectedIndex = index
+		}
 	case accountScreen:
 		if index >= 0 && index < len(m.ssoAccounts) {
 			m.ssoSelectedIndex = index
@@ -2181,30 +2211,24 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 		m.statusMessage = "Account selection"
 
 	case vim.CmdRegion:
-		// Cycle to next region
+		// Show region selection screen
 		if m.config == nil || len(m.config.Regions) == 0 {
 			m.statusMessage = "No regions configured"
 			return nil
 		}
-		// Find current region index
-		currentIndex := -1
+		// Find current region index to pre-select it
+		currentIndex := 0
 		for i, r := range m.config.Regions {
 			if r == m.config.Region {
 				currentIndex = i
 				break
 			}
 		}
-		// Cycle to next region
-		if currentIndex != -1 {
-			nextIndex := (currentIndex + 1) % len(m.config.Regions)
-			m.config.Region = m.config.Regions[nextIndex]
-			m.loading = true
-			m.statusMessage = fmt.Sprintf("Switching to region: %s", m.config.Region)
-			return m.initAWSClient
-		} else {
-			m.statusMessage = "Current region not found in config"
-			return nil
-		}
+		m.regionSelectedIndex = currentIndex
+		m.previousScreen = m.currentScreen
+		m.currentScreen = regionScreen
+		m.viewportOffset = 0
+		m.statusMessage = "Select a region"
 
 	default:
 		m.statusMessage = fmt.Sprintf("Unknown command: %s", cmd.Name)
@@ -2350,6 +2374,8 @@ func (m model) View() string {
 		content = m.renderSSOConfig()
 	case accountScreen:
 		content = m.renderAccountSelection()
+	case regionScreen:
+		content = m.renderRegionSelection()
 	case ec2Screen:
 		content = m.renderEC2()
 	case ec2DetailsScreen:
@@ -2950,6 +2976,89 @@ func (m model) renderAccountSelection() string {
 	if start > 0 || end < len(accounts) {
 		scrollInfo := fmt.Sprintf("\n[Showing %d-%d of %d | Use j/k or ↓/↑ to navigate]", start+1, end, len(accounts))
 		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(scrollInfo))
+	}
+
+	return content.String()
+}
+
+func (m model) renderRegionSelection() string {
+	title := lipgloss.NewStyle().Bold(true).Render("AWS Region Selection")
+
+	if m.config == nil || len(m.config.Regions) == 0 {
+		return title + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("No regions configured")
+	}
+
+	regions := m.config.Regions
+
+	// Ensure selected item is visible and get viewport range
+	m.ensureVisible(m.regionSelectedIndex, len(regions))
+	start, end := m.getVisibleRange(len(regions))
+
+	// Build table header (k9s style)
+	var content strings.Builder
+
+	// Title with count - k9s style
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true) // Cyan
+	tableTitle := fmt.Sprintf("AWS-Regions[%d]", len(regions))
+	titleText := titleStyle.Render(tableTitle)
+
+	// Center the title with dashes on both sides
+	titleWidth := len(tableTitle)
+	totalWidth := 80
+	dashesWidth := (totalWidth - titleWidth - 2) / 2
+	if dashesWidth < 1 {
+		dashesWidth = 1
+	}
+
+	content.WriteString(strings.Repeat("─", dashesWidth) + " ")
+	content.WriteString(titleText)
+	content.WriteString(" " + strings.Repeat("─", dashesWidth) + "\n")
+
+	// Table header - k9s uses uppercase and symbols
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Underline(true)
+	content.WriteString(headerStyle.Render(fmt.Sprintf("%-30s %-40s",
+		"REGION", "STATUS")) + "\n")
+
+	// Build table rows (only visible items)
+	for i := start; i < end; i++ {
+		region := regions[i]
+
+		// Show current region indicator
+		status := ""
+		if region == m.config.Region {
+			status = "✓ CURRENT"
+		}
+
+		// Build row with proper spacing
+		row := fmt.Sprintf("%-30s %-40s",
+			region,
+			status,
+		)
+
+		if i == m.regionSelectedIndex {
+			// Highlight the selected row - k9s style with cyan background
+			for len(row) < 70 {
+				row += " "
+			}
+			selectedStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("51")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
+			content.WriteString(selectedStyle.Render(row) + "\n")
+		} else {
+			// Normal row
+			normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+			content.WriteString(normalStyle.Render(row) + "\n")
+		}
+	}
+
+	// Add scroll indicators
+	if start > 0 || end < len(regions) {
+		scrollInfo := fmt.Sprintf("\n[Showing %d-%d of %d | Use j/k or ↓/↑ to navigate | Enter to select | ESC to cancel]", start+1, end, len(regions))
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(scrollInfo))
+	} else {
+		helpText := "\n[Use j/k or ↓/↑ to navigate | Enter to select | ESC to cancel]"
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(helpText))
 	}
 
 	return content.String()
