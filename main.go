@@ -1090,6 +1090,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.s3Buckets = nil
 		m.eksClusters = nil
 		m.clearSearch()
+		// Clear any previous errors
+		m.err = nil
 		// Switch to EC2 screen and load instances
 		m.currentScreen = ec2Screen
 		m.viewportOffset = 0
