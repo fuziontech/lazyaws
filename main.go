@@ -270,13 +270,21 @@ func initialModel(cfg *config.Config) model {
 
 	// Determine starting screen
 	startScreen := ec2Screen
+	shouldLoad := false
 	if authConfig == nil {
 		startScreen = authMethodScreen
+	} else if authConfig.Method == aws.AuthMethodSSO {
+		// For SSO, start at account selection screen and trigger SSO auth
+		startScreen = accountScreen
+		shouldLoad = true // Will trigger SSO authentication
+	} else {
+		// For env vars or profile, start at EC2 screen and load client
+		shouldLoad = true
 	}
 
 	return model{
 		currentScreen:        startScreen,
-		loading:              authConfig != nil, // Only load if we have config
+		loading:              shouldLoad,
 		config:               cfg,
 		filterInput:          ti,
 		ssoURLInput:          ssoInput,
@@ -300,6 +308,13 @@ func (m model) Init() tea.Cmd {
 	if m.authConfig == nil {
 		return nil
 	}
+
+	// For SSO, start authentication flow immediately
+	if m.authConfig.Method == aws.AuthMethodSSO {
+		return m.authenticateSSO(m.authConfig.SSOStartURL, m.authConfig.SSORegion)
+	}
+
+	// For other methods, initialize the client
 	return m.initAWSClient
 }
 
@@ -324,8 +339,10 @@ func (m model) initAWSClient() tea.Msg {
 				client.Region = m.config.Region
 			}
 		case aws.AuthMethodSSO:
-			// SSO will be handled via :account command
-			client, err = aws.NewClient(ctx, m.config)
+			// SSO: Don't initialize client yet - wait for SSO authentication and account selection
+			// This prevents using environment variables or other credential sources
+			// The client will be created in switchToSSOAccount after authentication
+			return nil
 		default:
 			client, err = aws.NewClient(ctx, m.config)
 		}
