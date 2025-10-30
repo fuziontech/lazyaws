@@ -3,18 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/creack/pty"
 	"github.com/fuziontech/lazyaws/internal/aws"
 	"github.com/fuziontech/lazyaws/internal/config"
 	"github.com/fuziontech/lazyaws/internal/vim"
+	"golang.org/x/term"
 )
 
 type screen int
@@ -4104,15 +4109,10 @@ func main() {
 		fmt.Printf("Connecting to instance %s via SSM...\n", m.ssmInstanceID)
 
 		// Create the SSM command
-		// Let the session-manager-plugin handle terminal mode itself
 		ssmCmd := exec.Command("aws", "ssm", "start-session", "--target", m.ssmInstanceID, "--region", m.ssmRegion)
-		ssmCmd.Stdin = os.Stdin
-		ssmCmd.Stdout = os.Stdout
-		ssmCmd.Stderr = os.Stderr
 
 		// If using SSO credentials, pass them as environment variables to AWS CLI
 		if m.ssoCredentials != nil {
-			// Clone current environment and add AWS credentials
 			ssmCmd.Env = os.Environ()
 			ssmCmd.Env = append(ssmCmd.Env,
 				fmt.Sprintf("AWS_ACCESS_KEY_ID=%s", m.ssoCredentials.AccessKeyID),
@@ -4121,22 +4121,43 @@ func main() {
 			)
 		}
 
-		// Run the command - let it handle signals naturally
-		err = ssmCmd.Run()
-
+		// Start the command with a PTY to properly handle signals
+		ptmx, err := pty.Start(ssmCmd)
 		if err != nil {
-			// Only show error if it's not a normal exit
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				// Exit code 130 means Ctrl+C was pressed - this is normal
-				if exitErr.ExitCode() != 130 {
-					fmt.Printf("\nSSM session ended with code %d\n", exitErr.ExitCode())
-				}
-			} else {
-				fmt.Printf("\nSSM session error: %v\n", err)
-				fmt.Println("Press Enter to return to lazyaws...")
-				fmt.Scanln()
-			}
+			fmt.Printf("Failed to start SSM session: %v\n", err)
+			fmt.Println("Press Enter to return to lazyaws...")
+			fmt.Scanln()
+			continue
 		}
+
+		// Handle terminal resize signals
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGWINCH)
+		go func() {
+			for range ch {
+				if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
+					fmt.Printf("Error resizing pty: %v\n", err)
+				}
+			}
+		}()
+		ch <- syscall.SIGWINCH // Initial resize
+
+		// Set stdin in raw mode
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			fmt.Printf("Failed to set raw mode: %v\n", err)
+			ptmx.Close()
+			continue
+		}
+
+		// Copy stdin/stdout
+		go func() { io.Copy(ptmx, os.Stdin) }()
+		io.Copy(os.Stdout, ptmx)
+
+		// Restore terminal
+		term.Restore(int(os.Stdin.Fd()), oldState)
+		signal.Stop(ch)
+		close(ch)
 
 		fmt.Println("\nReturning to lazyaws...")
 		// Loop continues and restarts the TUI
