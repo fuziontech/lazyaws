@@ -4097,87 +4097,45 @@ func truncate(s string, max int) string {
 }
 
 func (m model) renderHelp() string {
-	var content strings.Builder
-
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 
-	content.WriteString(titleStyle.Render("LazyAWS - Help & Keyboard Shortcuts"))
-	content.WriteString("\n\n")
+	help := titleStyle.Render("LazyAWS - Keyboard Shortcuts") + "\n\n"
 
-	// Navigation
-	content.WriteString(headerStyle.Render("Navigation"))
-	content.WriteString("\n")
-	content.WriteString(keyStyle.Render("  j/↓         ") + descStyle.Render("Move down\n"))
-	content.WriteString(keyStyle.Render("  k/↑         ") + descStyle.Render("Move up\n"))
-	content.WriteString(keyStyle.Render("  g           ") + descStyle.Render("Jump to top\n"))
-	content.WriteString(keyStyle.Render("  G           ") + descStyle.Render("Jump to bottom\n"))
-	content.WriteString(keyStyle.Render("  Ctrl+d      ") + descStyle.Render("Page down\n"))
-	content.WriteString(keyStyle.Render("  Ctrl+u      ") + descStyle.Render("Page up\n"))
-	content.WriteString(keyStyle.Render("  Enter       ") + descStyle.Render("View details / Select\n"))
-	content.WriteString(keyStyle.Render("  Esc/Backsp  ") + descStyle.Render("Go back\n"))
-	content.WriteString("\n")
+	help += headerStyle.Render("Navigation") + "\n"
+	help += "  j/k, ↓/↑    Move down/up\n"
+	help += "  g/G         Jump to top/bottom\n"
+	help += "  Ctrl+d/u    Page down/up\n"
+	help += "  Enter       View details\n"
+	help += "  Esc         Go back\n\n"
 
-	// VIM Commands
-	content.WriteString(headerStyle.Render("VIM Commands (press : to enter command mode)"))
-	content.WriteString("\n")
-	content.WriteString(keyStyle.Render("  :q          ") + descStyle.Render("Quit lazyaws\n"))
-	content.WriteString(keyStyle.Render("  :r          ") + descStyle.Render("Refresh current view\n"))
-	content.WriteString(keyStyle.Render("  :help       ") + descStyle.Render("Show this help screen\n"))
-	content.WriteString(keyStyle.Render("  :h, :?      ") + descStyle.Render("Show this help screen\n"))
-	content.WriteString(keyStyle.Render("  :sa         ") + descStyle.Render("Select all items\n"))
-	content.WriteString(keyStyle.Render("  :da         ") + descStyle.Render("Deselect all items\n"))
-	content.WriteString(keyStyle.Render("  :cf         ") + descStyle.Render("Clear current filter\n"))
-	content.WriteString(keyStyle.Render("  :ec2        ") + descStyle.Render("Switch to EC2 view\n"))
-	content.WriteString(keyStyle.Render("  :s3         ") + descStyle.Render("Switch to S3 view\n"))
-	content.WriteString(keyStyle.Render("  :eks        ") + descStyle.Render("Switch to EKS view\n"))
-	content.WriteString(keyStyle.Render("  :account    ") + descStyle.Render("Switch AWS account\n"))
-	content.WriteString(keyStyle.Render("  :region     ") + descStyle.Render("Switch AWS region\n"))
-	content.WriteString("\n")
+	help += headerStyle.Render("Commands") + " (press :)\n"
+	help += "  :q          Quit\n"
+	help += "  :r          Refresh\n"
+	help += "  :help       Show help\n"
+	help += "  :ec2/s3/eks Switch service\n"
+	help += "  :account    Switch account\n"
+	help += "  :region     Switch region\n\n"
 
-	// Search
-	content.WriteString(headerStyle.Render("Search"))
-	content.WriteString("\n")
-	content.WriteString(keyStyle.Render("  /           ") + descStyle.Render("Search (incremental)\n"))
-	content.WriteString(keyStyle.Render("  n           ") + descStyle.Render("Next match\n"))
-	content.WriteString(keyStyle.Render("  N           ") + descStyle.Render("Previous match\n"))
-	content.WriteString(keyStyle.Render("  Esc         ") + descStyle.Render("Clear search\n"))
-	content.WriteString("\n")
+	help += headerStyle.Render("Search") + "\n"
+	help += "  /           Search\n"
+	help += "  n/N         Next/prev match\n\n"
 
-	// EC2 Actions
-	content.WriteString(headerStyle.Render("EC2 Actions"))
-	content.WriteString("\n")
-	content.WriteString(keyStyle.Render("  s           ") + descStyle.Render("Start instance\n"))
-	content.WriteString(keyStyle.Render("  S           ") + descStyle.Render("Stop instance\n"))
-	content.WriteString(keyStyle.Render("  r           ") + descStyle.Render("Reboot instance\n"))
-	content.WriteString(keyStyle.Render("  t           ") + descStyle.Render("Terminate instance\n"))
-	content.WriteString(keyStyle.Render("  c           ") + descStyle.Render("Connect via SSM\n"))
-	content.WriteString(keyStyle.Render("  9           ") + descStyle.Render("Launch k9s for EKS node\n"))
-	content.WriteString(keyStyle.Render("  Space       ") + descStyle.Render("Multi-select toggle\n"))
-	content.WriteString("\n")
+	help += headerStyle.Render("EC2") + "\n"
+	help += "  s/S         Start/stop\n"
+	help += "  r/t         Reboot/terminate\n"
+	help += "  c           Connect SSM\n"
+	help += "  9           Launch k9s\n"
+	help += "  Space       Multi-select\n\n"
 
-	// S3 Actions
-	content.WriteString(headerStyle.Render("S3 Actions"))
-	content.WriteString("\n")
-	content.WriteString(keyStyle.Render("  Enter       ") + descStyle.Render("Browse bucket / Open folder\n"))
-	content.WriteString(keyStyle.Render("  d           ") + descStyle.Render("Delete object/bucket\n"))
-	content.WriteString(keyStyle.Render("  u           ") + descStyle.Render("Generate presigned URL\n"))
-	content.WriteString(keyStyle.Render("  p           ") + descStyle.Render("View bucket policy\n"))
-	content.WriteString(keyStyle.Render("  v           ") + descStyle.Render("View versioning status\n"))
-	content.WriteString("\n")
+	help += headerStyle.Render("S3") + "\n"
+	help += "  d           Delete\n"
+	help += "  u           Presigned URL\n"
+	help += "  p/v         Policy/versioning\n\n"
 
-	// EKS Actions
-	content.WriteString(headerStyle.Render("EKS Actions"))
-	content.WriteString("\n")
-	content.WriteString(keyStyle.Render("  9           ") + descStyle.Render("Launch k9s for cluster\n"))
-	content.WriteString(keyStyle.Render("  u           ") + descStyle.Render("Update kubeconfig\n"))
-	content.WriteString("\n")
+	help += "Press ESC or q to close"
 
-	content.WriteString(descStyle.Render("\nPress ESC or q to close this help screen"))
-
-	return content.String()
+	return help
 }
 
 func main() {
