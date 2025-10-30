@@ -37,6 +37,7 @@ const (
 	s3ObjectDetailsScreen
 	eksScreen
 	eksDetailsScreen
+	helpScreen
 )
 
 // Auth method indices
@@ -1230,8 +1231,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			// Don't quit if we're in details view, go back instead
-			if m.currentScreen == ec2DetailsScreen {
+			// Don't quit if we're in help screen, go back instead
+			if m.currentScreen == helpScreen {
+				m.currentScreen = m.previousScreen
+				m.viewportOffset = 0
+				return m, nil
+			} else if m.currentScreen == ec2DetailsScreen {
 				m.currentScreen = ec2Screen
 				m.ec2InstanceDetails = nil
 				m.viewportOffset = 0
@@ -1251,7 +1256,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc":
-			// ESC key to dismiss S3 info popup or clear presigned URL or clear search or go back from details view
+			// ESC key to dismiss help, S3 info popup, clear presigned URL, clear search, or go back from details view
+			if m.currentScreen == helpScreen {
+				// Close help modal and return to previous screen
+				m.currentScreen = m.previousScreen
+				m.viewportOffset = 0
+				return m, nil
+			}
 			if m.currentScreen == regionScreen {
 				// Go back to previous screen without changing region
 				m.currentScreen = m.previousScreen
@@ -2156,8 +2167,9 @@ func (m *model) executeVimCommand(commandStr string) tea.Cmd {
 		m.statusMessage = "Filter cleared"
 
 	case vim.CmdHelp, "h", "?":
-		// Show help message
-		m.statusMessage = "VIM commands: :q (quit), :r (refresh), :sa (select all), :da (deselect all), :cf (clear filter), :ec2/:s3/:eks (switch service)"
+		// Show help modal
+		m.previousScreen = m.currentScreen
+		m.currentScreen = helpScreen
 
 	case vim.CmdEC2:
 		// Switch to EC2 service
@@ -2395,6 +2407,8 @@ func (m model) View() string {
 		content = m.renderEKS()
 	case eksDetailsScreen:
 		content = m.renderEKSDetails()
+	case helpScreen:
+		content = m.renderHelp()
 	}
 
 	if m.filtering {
@@ -4080,6 +4094,90 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func (m model) renderHelp() string {
+	var content strings.Builder
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+
+	content.WriteString(titleStyle.Render("LazyAWS - Help & Keyboard Shortcuts"))
+	content.WriteString("\n\n")
+
+	// Navigation
+	content.WriteString(headerStyle.Render("Navigation"))
+	content.WriteString("\n")
+	content.WriteString(keyStyle.Render("  j/↓         ") + descStyle.Render("Move down\n"))
+	content.WriteString(keyStyle.Render("  k/↑         ") + descStyle.Render("Move up\n"))
+	content.WriteString(keyStyle.Render("  g           ") + descStyle.Render("Jump to top\n"))
+	content.WriteString(keyStyle.Render("  G           ") + descStyle.Render("Jump to bottom\n"))
+	content.WriteString(keyStyle.Render("  Ctrl+d      ") + descStyle.Render("Page down\n"))
+	content.WriteString(keyStyle.Render("  Ctrl+u      ") + descStyle.Render("Page up\n"))
+	content.WriteString(keyStyle.Render("  Enter       ") + descStyle.Render("View details / Select\n"))
+	content.WriteString(keyStyle.Render("  Esc/Backsp  ") + descStyle.Render("Go back\n"))
+	content.WriteString("\n")
+
+	// VIM Commands
+	content.WriteString(headerStyle.Render("VIM Commands (press : to enter command mode)"))
+	content.WriteString("\n")
+	content.WriteString(keyStyle.Render("  :q          ") + descStyle.Render("Quit lazyaws\n"))
+	content.WriteString(keyStyle.Render("  :r          ") + descStyle.Render("Refresh current view\n"))
+	content.WriteString(keyStyle.Render("  :help       ") + descStyle.Render("Show this help screen\n"))
+	content.WriteString(keyStyle.Render("  :h, :?      ") + descStyle.Render("Show this help screen\n"))
+	content.WriteString(keyStyle.Render("  :sa         ") + descStyle.Render("Select all items\n"))
+	content.WriteString(keyStyle.Render("  :da         ") + descStyle.Render("Deselect all items\n"))
+	content.WriteString(keyStyle.Render("  :cf         ") + descStyle.Render("Clear current filter\n"))
+	content.WriteString(keyStyle.Render("  :ec2        ") + descStyle.Render("Switch to EC2 view\n"))
+	content.WriteString(keyStyle.Render("  :s3         ") + descStyle.Render("Switch to S3 view\n"))
+	content.WriteString(keyStyle.Render("  :eks        ") + descStyle.Render("Switch to EKS view\n"))
+	content.WriteString(keyStyle.Render("  :account    ") + descStyle.Render("Switch AWS account\n"))
+	content.WriteString(keyStyle.Render("  :region     ") + descStyle.Render("Switch AWS region\n"))
+	content.WriteString("\n")
+
+	// Search
+	content.WriteString(headerStyle.Render("Search"))
+	content.WriteString("\n")
+	content.WriteString(keyStyle.Render("  /           ") + descStyle.Render("Search (incremental)\n"))
+	content.WriteString(keyStyle.Render("  n           ") + descStyle.Render("Next match\n"))
+	content.WriteString(keyStyle.Render("  N           ") + descStyle.Render("Previous match\n"))
+	content.WriteString(keyStyle.Render("  Esc         ") + descStyle.Render("Clear search\n"))
+	content.WriteString("\n")
+
+	// EC2 Actions
+	content.WriteString(headerStyle.Render("EC2 Actions"))
+	content.WriteString("\n")
+	content.WriteString(keyStyle.Render("  s           ") + descStyle.Render("Start instance\n"))
+	content.WriteString(keyStyle.Render("  S           ") + descStyle.Render("Stop instance\n"))
+	content.WriteString(keyStyle.Render("  r           ") + descStyle.Render("Reboot instance\n"))
+	content.WriteString(keyStyle.Render("  t           ") + descStyle.Render("Terminate instance\n"))
+	content.WriteString(keyStyle.Render("  c           ") + descStyle.Render("Connect via SSM\n"))
+	content.WriteString(keyStyle.Render("  9           ") + descStyle.Render("Launch k9s for EKS node\n"))
+	content.WriteString(keyStyle.Render("  Space       ") + descStyle.Render("Multi-select toggle\n"))
+	content.WriteString("\n")
+
+	// S3 Actions
+	content.WriteString(headerStyle.Render("S3 Actions"))
+	content.WriteString("\n")
+	content.WriteString(keyStyle.Render("  Enter       ") + descStyle.Render("Browse bucket / Open folder\n"))
+	content.WriteString(keyStyle.Render("  d           ") + descStyle.Render("Delete object/bucket\n"))
+	content.WriteString(keyStyle.Render("  u           ") + descStyle.Render("Generate presigned URL\n"))
+	content.WriteString(keyStyle.Render("  p           ") + descStyle.Render("View bucket policy\n"))
+	content.WriteString(keyStyle.Render("  v           ") + descStyle.Render("View versioning status\n"))
+	content.WriteString("\n")
+
+	// EKS Actions
+	content.WriteString(headerStyle.Render("EKS Actions"))
+	content.WriteString("\n")
+	content.WriteString(keyStyle.Render("  9           ") + descStyle.Render("Launch k9s for cluster\n"))
+	content.WriteString(keyStyle.Render("  u           ") + descStyle.Render("Update kubeconfig\n"))
+	content.WriteString("\n")
+
+	content.WriteString(descStyle.Render("\nPress ESC or q to close this help screen"))
+
+	return content.String()
 }
 
 func main() {
