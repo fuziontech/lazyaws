@@ -116,6 +116,7 @@ type model struct {
 	s3EditBucket            string   // Store bucket for S3 edit operation
 	s3EditKey               string   // Store key for S3 edit operation
 	s3NeedRestore           bool     // Flag to trigger S3 restore after edit
+	ec2NeedRestore          bool     // Flag to trigger EC2 restore after SSM
 	ssoAuthenticator        *aws.SSOAuthenticator
 	ssoCredentials          *aws.SSOCredentials // Current SSO credentials for passing to CLI
 	ssoAccounts             []aws.SSOAccount
@@ -209,6 +210,13 @@ type bucketVersioningLoadedMsg struct {
 type launchSSMSessionMsg struct {
 	instanceID string
 	region     string
+}
+
+type ssmRestoreInfo struct {
+	ssoCredentials *aws.SSOCredentials
+	accountID      string
+	accountName    string
+	region         string
 }
 
 type s3RestoreInfo struct {
@@ -330,6 +338,11 @@ func (m model) Init() tea.Cmd {
 	// If we need to restore S3 state after editing, trigger the load
 	if m.s3NeedRestore && m.s3CurrentBucket != "" && m.awsClient != nil {
 		return m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+	}
+
+	// If we need to restore EC2 state after SSM session, trigger the load
+	if m.ec2NeedRestore && m.awsClient != nil {
+		return m.loadEC2Instances
 	}
 
 	// If auth config doesn't exist, stay on auth method selection screen
@@ -4264,6 +4277,7 @@ func main() {
 
 	// Main loop: run the TUI, and if SSM session is requested, run it and restart
 	var s3Restore *s3RestoreInfo
+	var ssmRestore *ssmRestoreInfo
 	var savedClient *aws.Client
 	for {
 		m := initialModel(cfg)
@@ -4284,6 +4298,23 @@ func main() {
 				m.ssoCredentials = s3Restore.ssoCredentials
 				m.currentAccountID = s3Restore.accountID
 				m.currentAccountName = s3Restore.accountName
+			}
+		}
+
+		// Restore state if we're coming back from SSM session
+		if ssmRestore != nil {
+			m.currentScreen = ec2Screen
+			m.ec2NeedRestore = true
+			m.loading = true
+			// Restore the AWS client so we don't need to re-auth
+			if savedClient != nil {
+				m.awsClient = savedClient
+			}
+			// Restore SSO credentials and account info
+			if ssmRestore.ssoCredentials != nil {
+				m.ssoCredentials = ssmRestore.ssoCredentials
+				m.currentAccountID = ssmRestore.accountID
+				m.currentAccountName = ssmRestore.accountName
 			}
 		}
 
@@ -4324,14 +4355,26 @@ func main() {
 			continue
 		}
 
-		// Clear restore state if we're not editing
+		// Clear S3 restore state if we're not editing
 		s3Restore = nil
 
 		// Handle SSM session
 		if finalM.ssmInstanceID == "" {
 			// Normal exit, no SSM session to launch
+			// Clear SSM restore state too
+			ssmRestore = nil
 			break
 		}
+
+		// Save current state for restoration after SSM session
+		ssmRestore = &ssmRestoreInfo{
+			ssoCredentials: finalM.ssoCredentials,
+			accountID:      finalM.currentAccountID,
+			accountName:    finalM.currentAccountName,
+			region:         finalM.ssmRegion,
+		}
+		// Save AWS client to avoid re-authentication
+		savedClient = finalM.awsClient
 
 		// Launch SSM session in the current terminal
 		fmt.Printf("Connecting to instance %s via SSM...\n", finalM.ssmInstanceID)
