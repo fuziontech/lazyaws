@@ -115,6 +115,7 @@ type model struct {
 	ssmRegion               string   // Store region for SSM session launch
 	s3EditBucket            string   // Store bucket for S3 edit operation
 	s3EditKey               string   // Store key for S3 edit operation
+	s3NeedRestore           bool     // Flag to trigger S3 restore after edit
 	ssoAuthenticator        *aws.SSOAuthenticator
 	ssoCredentials          *aws.SSOCredentials // Current SSO credentials for passing to CLI
 	ssoAccounts             []aws.SSOAccount
@@ -208,6 +209,15 @@ type bucketVersioningLoadedMsg struct {
 type launchSSMSessionMsg struct {
 	instanceID string
 	region     string
+}
+
+type s3RestoreInfo struct {
+	bucket         string
+	prefix         string
+	screen         screen
+	ssoCredentials *aws.SSOCredentials
+	accountID      string
+	accountName    string
 }
 
 type eksClustersLoadedMsg struct {
@@ -317,6 +327,11 @@ func initialModel(cfg *config.Config) model {
 }
 
 func (m model) Init() tea.Cmd {
+	// If we need to restore S3 state after editing, trigger the load
+	if m.s3NeedRestore && m.s3CurrentBucket != "" && m.awsClient != nil {
+		return m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
+	}
+
 	// If auth config doesn't exist, stay on auth method selection screen
 	if m.authConfig == nil {
 		return nil
@@ -2639,6 +2654,7 @@ func (m model) renderK9sHeader() string {
 	case s3BrowseScreen:
 		keyHints = []string{
 			keyHintKeyStyle.Render("<enter>") + " " + keyHintActionStyle.Render("Open"),
+			keyHintKeyStyle.Render("<e>") + " " + keyHintActionStyle.Render("Edit"),
 			keyHintKeyStyle.Render("<d>") + " " + keyHintActionStyle.Render("Download"),
 			keyHintKeyStyle.Render("<D>") + " " + keyHintActionStyle.Render("Delete"),
 			keyHintKeyStyle.Render("<h>") + " " + keyHintActionStyle.Render("Up"),
@@ -2647,6 +2663,7 @@ func (m model) renderK9sHeader() string {
 		}
 	case s3ObjectDetailsScreen:
 		keyHints = []string{
+			keyHintKeyStyle.Render("<e>") + " " + keyHintActionStyle.Render("Edit"),
 			keyHintKeyStyle.Render("<d>") + " " + keyHintActionStyle.Render("Download"),
 			keyHintKeyStyle.Render("<p>") + " " + keyHintActionStyle.Render("Presigned URL"),
 			keyHintKeyStyle.Render("<esc>") + " " + keyHintActionStyle.Render("Back"),
@@ -4246,8 +4263,31 @@ func main() {
 	}
 
 	// Main loop: run the TUI, and if SSM session is requested, run it and restart
+	var s3Restore *s3RestoreInfo
+	var savedClient *aws.Client
 	for {
-		p := tea.NewProgram(initialModel(cfg), tea.WithAltScreen())
+		m := initialModel(cfg)
+
+		// Restore S3 state if we're coming back from editing
+		if s3Restore != nil {
+			m.currentScreen = s3Restore.screen
+			m.s3CurrentBucket = s3Restore.bucket
+			m.s3CurrentPrefix = s3Restore.prefix
+			m.s3NeedRestore = true
+			m.loading = true
+			// Restore the AWS client so we don't need to re-auth
+			if savedClient != nil {
+				m.awsClient = savedClient
+			}
+			// Restore SSO credentials and account info
+			if s3Restore.ssoCredentials != nil {
+				m.ssoCredentials = s3Restore.ssoCredentials
+				m.currentAccountID = s3Restore.accountID
+				m.currentAccountName = s3Restore.accountName
+			}
+		}
+
+		p := tea.NewProgram(m, tea.WithAltScreen())
 		finalModel, err := p.Run()
 		if err != nil {
 			fmt.Printf("Error: %v", err)
@@ -4255,42 +4295,57 @@ func main() {
 		}
 
 		// Check if we should launch an SSM session or edit an S3 file
-		m, ok := finalModel.(model)
+		finalM, ok := finalModel.(model)
 		if !ok {
 			// Normal exit
 			break
 		}
 
 		// Handle S3 file editing
-		if m.s3EditBucket != "" && m.s3EditKey != "" {
-			if err := editS3File(&m); err != nil {
+		if finalM.s3EditBucket != "" && finalM.s3EditKey != "" {
+			// Save current S3 state for restoration
+			s3Restore = &s3RestoreInfo{
+				bucket:         finalM.s3CurrentBucket,
+				prefix:         finalM.s3CurrentPrefix,
+				screen:         finalM.currentScreen,
+				ssoCredentials: finalM.ssoCredentials,
+				accountID:      finalM.currentAccountID,
+				accountName:    finalM.currentAccountName,
+			}
+			// Save AWS client to avoid re-authentication
+			savedClient = finalM.awsClient
+
+			if err := editS3File(&finalM); err != nil {
 				fmt.Printf("Error editing S3 file: %v\n", err)
 				fmt.Println("Press Enter to return to lazyaws...")
 				fmt.Scanln()
 			}
-			// Clear the edit state and restart TUI
+			// Restart TUI with saved state
 			continue
 		}
 
+		// Clear restore state if we're not editing
+		s3Restore = nil
+
 		// Handle SSM session
-		if m.ssmInstanceID == "" {
+		if finalM.ssmInstanceID == "" {
 			// Normal exit, no SSM session to launch
 			break
 		}
 
 		// Launch SSM session in the current terminal
-		fmt.Printf("Connecting to instance %s via SSM...\n", m.ssmInstanceID)
+		fmt.Printf("Connecting to instance %s via SSM...\n", finalM.ssmInstanceID)
 
 		// Create the SSM command
-		ssmCmd := exec.Command("aws", "ssm", "start-session", "--target", m.ssmInstanceID, "--region", m.ssmRegion)
+		ssmCmd := exec.Command("aws", "ssm", "start-session", "--target", finalM.ssmInstanceID, "--region", finalM.ssmRegion)
 
 		// If using SSO credentials, pass them as environment variables to AWS CLI
-		if m.ssoCredentials != nil {
+		if finalM.ssoCredentials != nil {
 			ssmCmd.Env = os.Environ()
 			ssmCmd.Env = append(ssmCmd.Env,
-				fmt.Sprintf("AWS_ACCESS_KEY_ID=%s", m.ssoCredentials.AccessKeyID),
-				fmt.Sprintf("AWS_SECRET_ACCESS_KEY=%s", m.ssoCredentials.SecretAccessKey),
-				fmt.Sprintf("AWS_SESSION_TOKEN=%s", m.ssoCredentials.SessionToken),
+				fmt.Sprintf("AWS_ACCESS_KEY_ID=%s", finalM.ssoCredentials.AccessKeyID),
+				fmt.Sprintf("AWS_SECRET_ACCESS_KEY=%s", finalM.ssoCredentials.SecretAccessKey),
+				fmt.Sprintf("AWS_SESSION_TOKEN=%s", finalM.ssoCredentials.SessionToken),
 			)
 		}
 
