@@ -113,6 +113,8 @@ type model struct {
 	commandSuggestions      []string // Command suggestions for tab completion
 	ssmInstanceID           string   // Store instance ID for SSM session launch
 	ssmRegion               string   // Store region for SSM session launch
+	s3EditBucket            string   // Store bucket for S3 edit operation
+	s3EditKey               string   // Store key for S3 edit operation
 	ssoAuthenticator        *aws.SSOAuthenticator
 	ssoCredentials          *aws.SSOCredentials // Current SSO credentials for passing to CLI
 	ssoAccounts             []aws.SSOAccount
@@ -1552,6 +1554,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.loadS3Objects(m.s3CurrentBucket, m.s3CurrentPrefix, nil)
 			}
 
+		case "e":
+			// Edit selected S3 object in $EDITOR
+			if m.currentScreen == s3BrowseScreen {
+				// Use filtered list if active
+				objects := m.s3Objects
+				if len(m.s3FilteredObjects) > 0 {
+					objects = m.s3FilteredObjects
+				}
+				if len(objects) > 0 && m.s3ObjectSelectedIndex < len(objects) {
+					selectedObject := objects[m.s3ObjectSelectedIndex]
+					if !selectedObject.IsFolder {
+						m.s3EditBucket = m.s3CurrentBucket
+						m.s3EditKey = selectedObject.Key
+						m.statusMessage = fmt.Sprintf("Opening %s in editor...", selectedObject.Key)
+						return m, tea.Quit
+					}
+				}
+			} else if m.currentScreen == s3ObjectDetailsScreen && m.s3ObjectDetails != nil {
+				m.s3EditBucket = m.s3CurrentBucket
+				m.s3EditKey = m.s3ObjectDetails.Key
+				m.statusMessage = fmt.Sprintf("Opening %s in editor...", m.s3ObjectDetails.Key)
+				return m, tea.Quit
+			}
 		case "d":
 			// Download selected S3 object
 			if m.currentScreen == s3BrowseScreen {
@@ -4129,6 +4154,7 @@ func (m model) renderHelp() string {
 	help += "  Space       Multi-select\n\n"
 
 	help += headerStyle.Render("S3") + "\n"
+	help += "  e           Edit file in $EDITOR\n"
 	help += "  d           Delete\n"
 	help += "  u           Presigned URL\n"
 	help += "  p/v         Policy/versioning\n\n"
@@ -4136,6 +4162,80 @@ func (m model) renderHelp() string {
 	help += "Press ESC or q to close"
 
 	return help
+}
+
+func editS3File(m *model) error {
+	ctx := context.Background()
+
+	// Create a temporary file with the same extension as the S3 object
+	fileName := m.s3EditKey
+	if strings.Contains(fileName, "/") {
+		parts := strings.Split(fileName, "/")
+		fileName = parts[len(parts)-1]
+	}
+
+	tmpFile, err := os.CreateTemp("", fmt.Sprintf("lazyaws-*.%s", fileName))
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Download the S3 object to the temp file
+	fmt.Printf("Downloading %s from s3://%s/%s...\n", fileName, m.s3EditBucket, m.s3EditKey)
+	if err := m.awsClient.DownloadObject(ctx, m.s3EditBucket, m.s3EditKey, tmpPath); err != nil {
+		return fmt.Errorf("failed to download file: %w", err)
+	}
+
+	// Get file modification time before editing
+	statBefore, err := os.Stat(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat temp file: %w", err)
+	}
+	modTimeBefore := statBefore.ModTime()
+
+	// Get editor from environment, default to vi
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+
+	// Open the file in the editor
+	fmt.Printf("Opening in %s...\n", editor)
+	editorCmd := exec.Command(editor, tmpPath)
+	editorCmd.Stdin = os.Stdin
+	editorCmd.Stdout = os.Stdout
+	editorCmd.Stderr = os.Stderr
+
+	if err := editorCmd.Run(); err != nil {
+		return fmt.Errorf("editor exited with error: %w", err)
+	}
+
+	// Check if the file was modified
+	statAfter, err := os.Stat(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat temp file after edit: %w", err)
+	}
+	modTimeAfter := statAfter.ModTime()
+
+	if modTimeAfter.Equal(modTimeBefore) {
+		fmt.Println("File not modified, skipping upload")
+		fmt.Println("Press Enter to return to lazyaws...")
+		fmt.Scanln()
+		return nil
+	}
+
+	// Upload the edited file back to S3
+	fmt.Printf("Uploading changes to s3://%s/%s...\n", m.s3EditBucket, m.s3EditKey)
+	if err := m.awsClient.UploadObject(ctx, m.s3EditBucket, m.s3EditKey, tmpPath); err != nil {
+		return fmt.Errorf("failed to upload file: %w", err)
+	}
+
+	fmt.Println("File uploaded successfully!")
+	fmt.Println("Press Enter to return to lazyaws...")
+	fmt.Scanln()
+	return nil
 }
 
 func main() {
@@ -4154,9 +4254,26 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Check if we should launch an SSM session
+		// Check if we should launch an SSM session or edit an S3 file
 		m, ok := finalModel.(model)
-		if !ok || m.ssmInstanceID == "" {
+		if !ok {
+			// Normal exit
+			break
+		}
+
+		// Handle S3 file editing
+		if m.s3EditBucket != "" && m.s3EditKey != "" {
+			if err := editS3File(&m); err != nil {
+				fmt.Printf("Error editing S3 file: %v\n", err)
+				fmt.Println("Press Enter to return to lazyaws...")
+				fmt.Scanln()
+			}
+			// Clear the edit state and restart TUI
+			continue
+		}
+
+		// Handle SSM session
+		if m.ssmInstanceID == "" {
 			// Normal exit, no SSM session to launch
 			break
 		}
