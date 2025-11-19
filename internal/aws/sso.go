@@ -5,15 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sso"
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc"
+	"github.com/skratchdot/open-golang/open"
 )
 
 const (
@@ -111,7 +110,8 @@ func (a *SSOAuthenticator) Authenticate(ctx context.Context) error {
 	for time.Now().Before(expiresAt) {
 		time.Sleep(interval)
 
-		tokenResp, err := oidcClient.CreateToken(ctx, &ssooidc.CreateTokenInput{
+	
+tokenResp, err := oidcClient.CreateToken(ctx, &ssooidc.CreateTokenInput{
 			ClientId:     &a.session.ClientID,
 			ClientSecret: &a.session.ClientSecret,
 			GrantType:    strPtr("urn:ietf:params:oauth:grant-type:device_code"),
@@ -232,7 +232,7 @@ func (a *SSOAuthenticator) GetCredentials(ctx context.Context, accountID, roleNa
 		SecretAccessKey: *creds.SecretAccessKey,
 		SessionToken:    *creds.SessionToken,
 		Expiration:      expiresAt,
-	}, nil
+	},
 }
 
 // registerClient registers the application as an SSO OIDC client
@@ -319,40 +319,7 @@ func (a *SSOAuthenticator) saveCachedSession() error {
 
 // openBrowser opens the default browser to the given URL
 func openBrowser(url string) error {
-	var cmd *exec.Cmd
-	var candidates [][]string
-
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		// Try multiple browsers in order of preference
-		candidates = [][]string{
-			{"xdg-open", url},
-			{"sensible-browser", url},
-			{"firefox", url},
-			{"google-chrome", url},
-			{"chromium", url},
-		}
-
-		// Try each candidate until one succeeds
-		var lastErr error
-		for _, args := range candidates {
-			cmd = exec.Command(args[0], args[1:]...)
-			if err := cmd.Start(); err == nil {
-				return nil
-			} else {
-				lastErr = err
-			}
-		}
-		return fmt.Errorf("failed to open browser (tried xdg-open, sensible-browser, firefox, chrome, chromium): %w", lastErr)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
-	}
-
-	return cmd.Start()
+	return open.Run(url)
 }
 
 // isAuthPending checks if the error indicates authorization is still pending
