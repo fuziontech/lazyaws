@@ -232,7 +232,7 @@ func (a *SSOAuthenticator) GetCredentials(ctx context.Context, accountID, roleNa
 		SecretAccessKey: *creds.SecretAccessKey,
 		SessionToken:    *creds.SessionToken,
 		Expiration:      expiresAt,
-	},
+	}, nil
 }
 
 // registerClient registers the application as an SSO OIDC client
